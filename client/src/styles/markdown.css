@@ -1,0 +1,211 @@
+/* Custom Markdown Styles for AI Solutions */
+
+.markdown-solution {
+  line-height: 1.6;
+}
+
+.markdown-solution h1 {
+  color: #1e40af;
+  border-bottom: 2px solid #3b82f6;
+  padding-bottom: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.markdown-solution h2 {
+  color: #1d4ed8;
+  margin-top: 1.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.markdown-solution h3 {
+  color: #2563eb;
+  margin-top: 1rem;
+  margin-bottom: 0.5rem;
+}
+
+.markdown-solution strong {
+  color: #1e40af;
+  font-weight: 700;
+}
+
+.markdown-solution em {
+  color: #7c3aed;
+}
+
+.markdown-solution code {
+  background-color: #f3f4f6;
+  color: #dc2626;
+  padding: 0.25rem 0.5rem;
+  border-radius: 0.375rem;
+  font-family: 'Courier New', monospace;
+  font-size: 0.875rem;
+}
+
+.dark .markdown-solution code {
+  background-color: #374151;
+  color: #f87171;
+}
+
+.markdown-solution pre {
+  background-color: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 0.5rem;
+  padding: 1rem;
+  overflow-x: auto;
+  margin: 1rem 0;
+}
+
+.dark .markdown-solution pre {
+  background-color: #1f2937;
+  border-color: #4b5563;
+}
+
+.markdown-solution blockquote {
+  border-left: 4px solid #3b82f6;
+  background-color: #eff6ff;
+  padding: 1rem;
+  margin: 1rem 0;
+  border-radius: 0.375rem;
+  font-style: italic;
+}
+
+.dark .markdown-solution blockquote {
+  background-color: #1e3a8a;
+  background-opacity: 0.2;
+}
+
+.markdown-solution ul, .markdown-solution ol {
+  margin: 1rem 0;
+  padding-left: 1.5rem;
+}
+
+.markdown-solution li {
+  margin: 0.25rem 0;
+}
+
+.markdown-solution mark {
+  background-color: #fef3c7;
+  color: #92400e;
+  padding: 0.125rem 0.25rem;
+  border-radius: 0.25rem;
+  font-weight: 600;
+}
+
+.dark .markdown-solution mark {
+  background-color: #451a03;
+  color: #fbbf24;
+}
+
+/* Question styling - Red color */
+.question-text {
+  color: #dc2626;
+  background-color: #fef2f2;
+  border-left: 4px solid #ef4444;
+  padding: 0.75rem;
+  margin: 0.5rem 0;
+  border-radius: 0.375rem;
+  font-weight: 600;
+}
+
+.dark .question-text {
+  color: #fca5a5;
+  background-color: #7f1d1d;
+  background-opacity: 0.3;
+  border-color: #dc2626;
+}
+
+/* Solution styling - Green color */
+.solution-text {
+  color: #059669;
+  background-color: #ecfdf5;
+  border-left: 4px solid #10b981;
+  padding: 0.75rem;
+  margin: 0.5rem 0;
+  border-radius: 0.375rem;
+  font-weight: 700;
+  text-align: center;
+}
+
+.dark .solution-text {
+  color: #6ee7b7;
+  background-color: #064e3b;
+  background-opacity: 0.3;
+  border-color: #059669;
+}
+
+/* Main solution highlight - Enhanced green styling */
+.main-solution-highlight {
+  background: linear-gradient(135deg, #10b981, #059669);
+  color: white;
+  padding: 1rem 1.5rem;
+  margin: 1rem 0;
+  border-radius: 0.75rem;
+  font-weight: 700;
+  text-align: center;
+  box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+  border: 2px solid #059669;
+  position: relative;
+  overflow: hidden;
+}
+
+.main-solution-highlight::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+  animation: shimmer 2s infinite;
+}
+
+.dark .main-solution-highlight {
+  background: linear-gradient(135deg, #059669, #047857);
+  border-color: #10b981;
+  box-shadow: 0 4px 12px rgba(16, 185, 129, 0.2);
+}
+
+@keyframes shimmer {
+  0% { left: -100%; }
+  100% { left: 100%; }
+}
+
+/* Typing cursor animation */
+@keyframes blink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}
+
+.animate-blink {
+  animation: blink 1s infinite;
+}
+
+/* Solution section styling */
+.solution-section {
+  background-color: #f0fdf4;
+  border: 2px solid #22c55e;
+  border-radius: 0.5rem;
+  padding: 1rem;
+  margin: 1rem 0;
+}
+
+.dark .solution-section {
+  background-color: #052e16;
+  background-opacity: 0.3;
+  border-color: #16a34a;
+}
+
+/* Step styling - Keep neutral but clean */
+.markdown-solution ol li {
+  background-color: #f8fafc;
+  border-left: 3px solid #64748b;
+  padding: 0.5rem;
+  margin: 0.25rem 0;
+  border-radius: 0.25rem;
+}
+
+.dark .markdown-solution ol li {
+  background-color: #1e293b;
+  background-opacity: 0.5;
+  border-color: #475569;
+}
