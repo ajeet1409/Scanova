@@ -2,6 +2,85 @@ const Image = require('../models/Image');
 const geminiAI = require('../utils/geminiAI');
 
 class ImageController {
+  // Stream AI solution in real-time using direct streaming
+  async streamSolution(req, res) {
+    try {
+      const { text } = req.body;
+
+      if (!text || text.trim().length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'No text provided for processing'
+        });
+      }
+
+      const startTime = Date.now();
+
+      // Set headers for SIMULTANEOUS streaming - optimized for speed
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      res.setHeader("Transfer-Encoding", "chunked");
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering for immediate streaming
+
+      let fullSolution = '';
+
+      try {
+        // Stream AI solution directly to response - SIMULTANEOUS generation and sending
+        await geminiAI.analyzeAndSolveStreamDirect(text, (chunk) => {
+          fullSolution += chunk;
+          // Write chunk IMMEDIATELY to response as soon as it's generated
+          if (chunk && !res.destroyed) {
+            res.write(chunk);
+            // Force flush the response to send data immediately
+            if (res.flush) res.flush();
+          }
+        });
+
+        const processingTime = Date.now() - startTime;
+
+        // Save to database (optional - for analytics)
+        try {
+          const imageRecord = new Image({
+            user: req.user ? req.user._id : null,
+            filename: `text_${Date.now()}.txt`,
+            originalName: 'extracted_text.txt',
+            mimetype: 'text/plain',
+            size: text.length,
+            path: '',
+            extractedText: text,
+            solution: fullSolution,
+            processingStatus: 'completed',
+            processingTime,
+            metadata: {
+              textLength: text.length,
+              solutionLength: fullSolution.length
+            }
+          });
+
+          await imageRecord.save();
+        } catch (dbError) {
+          console.error('Database save error:', dbError);
+        }
+
+      } catch (aiError) {
+        console.error('AI processing error:', aiError);
+        res.write('\n\n❌ Error: Failed to generate solution');
+      }
+
+      res.end();
+
+    } catch (error) {
+      console.error('Stream solution error:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Failed to stream solution',
+        message: error.message
+      });
+    }
+  }
+
   // Process text extracted from frontend OCR
   async processText(req, res) {
     try {

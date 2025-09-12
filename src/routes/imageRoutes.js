@@ -8,6 +8,9 @@ const router = express.Router();
 // Process extracted text and get AI solution (with optional auth)
 router.post('/process-text', optionalAuth, validateTextInput, imageController.processText);
 
+// Stream AI solution in real-time (with optional auth)
+router.post('/stream-solution', optionalAuth, validateTextInput, imageController.streamSolution);
+
 // Get processing history (protected - requires auth)
 router.get('/history', authenticateToken, validatePagination, imageController.getHistory);
 
@@ -28,6 +31,7 @@ router.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
     endpoints: {
       'POST /process-text': 'Process extracted text and get AI solution',
+      'POST /stream-solution': 'Stream AI solution in real-time',
       'GET /history': 'Get processing history with pagination',
       'GET /history/:id': 'Get specific record by ID',
       'DELETE /history/:id': 'Delete specific record',

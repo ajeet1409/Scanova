@@ -5,9 +5,10 @@ class GeminiAI {
     if (!process.env.GEMINI_API_KEY) {
       throw new Error('GEMINI_API_KEY is required in environment variables');
     }
-    
+
     this.genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    this.model = this.genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+    // Use the faster gemini-2.0-flash model like in your code reviewer
+    this.model = this.genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
   }
 
   async analyzeAndSolve(extractedText) {
@@ -33,39 +34,80 @@ class GeminiAI {
     }
   }
 
+  async analyzeAndSolveStream(extractedText, onChunk) {
+    try {
+      const prompt = this.createUniversalPrompt(extractedText);
+
+      const result = await this.model.generateContentStream(prompt);
+
+      for await (const chunk of result.stream) {
+        const chunkText = chunk.text();
+        if (chunkText && onChunk) {
+          onChunk(chunkText);
+        }
+      }
+
+      return {
+        success: true,
+        originalText: extractedText
+      };
+    } catch (error) {
+      console.error('Gemini AI Stream Error:', error);
+      throw error;
+    }
+  }
+
+  // SIMULTANEOUS streaming - generate and send data at the same time
+  async analyzeAndSolveStreamDirect(extractedText, onChunk) {
+    try {
+      const prompt = this.createUniversalPrompt(extractedText);
+
+      // Start streaming immediately - no waiting
+      const result = await this.model.generateContentStream(prompt);
+
+      // Process each chunk IMMEDIATELY as it's generated
+      for await (const chunk of result.stream) {
+        const text = chunk.text();
+        if (text && onChunk) {
+          // Send chunk IMMEDIATELY to frontend - no buffering, no delays
+          onChunk(text);
+        }
+      }
+
+      return {
+        success: true,
+        originalText: extractedText
+      };
+    } catch (error) {
+      console.error('Gemini AI Simultaneous Stream Error:', error);
+      throw error;
+    }
+  }
+
   createUniversalPrompt(text) {
     return `
-You are an intelligent AI assistant capable of analyzing and solving various types of problems. I will provide you with text extracted from an image that may contain questions, problems, or content requiring analysis.
+You are an intelligent AI assistant that analyzes and solves problems from extracted text.
 
-Your task is to:
-1. **Identify the type of content** (mathematical problems, science questions, language exercises, general text, diagrams, etc.)
-2. **Provide comprehensive solutions or explanations** based on the content type:
-   - For **Math**: Step-by-step solutions with clear explanations
-   - For **Science**: Detailed explanations with relevant concepts
-   - For **Language**: Grammar corrections, translations, or explanations
-   - For **General Questions**: Informative and helpful answers
-   - For **Text Analysis**: Summaries, insights, or interpretations
-   - For **Instructions**: Clear guidance or clarifications
-3. **Show your reasoning** and provide educational value
-4. **Handle multiple items** if present, addressing each separately
-5. **Be helpful and educational** regardless of the content type
+**Your task:**
+1. Analyze the following text carefully.
+2. Identify the type of content (math, science, language, general questions, etc.).
+3. Provide step-by-step solutions with clear explanations.
+4. Format your response using **Markdown** for better readability.
+5. Be concise but comprehensive.
 
-Text extracted from image:
+**Text extracted from image:**
 "${text}"
 
-Please provide a comprehensive response with:
-- **Content Type**: What kind of content this appears to be
-- **Analysis/Solution**: Detailed response appropriate to the content
-- **Step-by-step breakdown** when applicable
-- **Key insights or final answers** clearly highlighted
-- **Educational explanations** of concepts involved
+**Instructions:**
+- Use **bold** for important terms and final answers
+- Use \`code blocks\` for mathematical expressions
+- Use numbered lists for step-by-step solutions
+- Provide clear, educational explanations
+- If it's a math problem, show all work
+- If it's a question, provide a complete answer
+- If the text is unclear, explain what you can interpret
 
-If the text is unclear, incomplete, or doesn't contain recognizable content, please:
-- Explain what you can interpret from the available text
-- Suggest how to improve image quality or content for better results
-- Provide any helpful context or related information you can offer
-
-Format your response clearly with proper headings and structure for easy reading.
+Analyze and solve:
 `;
   }
 

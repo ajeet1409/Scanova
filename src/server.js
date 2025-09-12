@@ -37,23 +37,35 @@ app.use('/api/chatbot', require('./routes/chatbot'));
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.status(200).json({ 
-    status: 'OK', 
+  res.status(200).json({
+    status: 'OK',
     message: 'Image Processing Server is running',
     timestamp: new Date().toISOString()
   });
 });
 
+// Production static client (serve React build)
+if (process.env.NODE_ENV === 'production') {
+  const clientDistPath = path.resolve(__dirname, '..', 'client', 'dist');
+  app.use(express.static(clientDistPath));
+
+  // Fallback to index.html for client-side routing, but only for non-API routes
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api') || req.path.startsWith('/uploads')) return next();
+    res.sendFile(path.join(clientDistPath, 'index.html'));
+  });
+}
+
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error('Error:', err.stack);
-  res.status(500).json({ 
+  res.status(500).json({
     error: 'Something went wrong!',
     message: process.env.NODE_ENV === 'development' ? err.message : 'Internal server error'
   });
 });
 
-// 404 handler
+// 404 handler for any unmatched API routes or other requests
 app.use('*', (req, res) => {
   res.status(404).json({ error: 'Route not found' });
 });
@@ -68,6 +80,16 @@ const connectDB = async () => {
     process.exit(1);
   }
 };
+
+//Production Deployment Code
+if (process.env.NODE_ENV === "production") {
+  const dirPath = path.resolve()
+  app.use(express.static("./client/dist"))
+  app.get("*", (req, res) => {
+    res.sendFile(path.resolve(dirPath, "./client/dist", "index.html"))
+  })
+}
+
 
 // Start server
 const startServer = async () => {
@@ -86,11 +108,15 @@ const startServer = async () => {
 
 startServer();
 
+
+
+
 // Graceful shutdown
 process.on('SIGINT', async () => {
   console.log('\n🛑 Shutting down server...');
   await mongoose.connection.close();
   process.exit(0);
 });
+
 
 module.exports = app;
