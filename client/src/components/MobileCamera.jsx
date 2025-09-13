@@ -279,6 +279,17 @@ const MobileCamera = () => {
     runCoco();
   }, []);
 
+  // Default to rear camera on mobile devices
+  useEffect(() => {
+    try {
+      const ua = typeof navigator !== 'undefined' ? navigator.userAgent || '' : '';
+      const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(ua);
+      if (isMobile) {
+        setCameraMode('environment');
+      }
+    } catch (e) {}
+  }, []);
+
   // Auto-extract OCR when a document bbox is stably detected
   useEffect(() => {
     // clear pending timer
@@ -367,7 +378,7 @@ const MobileCamera = () => {
         </h1>
         <p className="text-sm text-gray-200 mb-4">{isLoading ? 'Loading model...' : 'Point camera at a page or document'}</p>
 
-        <div className="relative w-full max-w-md md:max-w-3xl bg-black rounded-lg overflow-hidden shadow-lg" style={{aspectRatio: '4/3'}}>
+  <div className="relative w-full max-w-md md:max-w-3xl bg-black rounded-lg overflow-hidden shadow-lg mx-auto" style={{aspectRatio: '4/3'}}>
           <Webcam
             ref={webcamRef}
             audio={false}
@@ -395,6 +406,14 @@ const MobileCamera = () => {
               pointerEvents: 'none'
             }}
           />
+          {/* Mobile overlay toggle (inside preview) */}
+          <button
+            onClick={() => setCameraMode(prev => prev === 'user' ? 'environment' : 'user')}
+            className="absolute bottom-3 right-3 z-20 bg-white bg-opacity-80 text-sm text-gray-800 px-3 py-2 rounded-full shadow"
+            style={{backdropFilter: 'blur(6px)'}}
+          >
+            {cameraMode === 'user' ? 'Rear' : 'Front'}
+          </button>
         </div>
 
         <div className="flex items-center justify-between gap-4 mt-3 w-full max-w-md md:max-w-3xl">
