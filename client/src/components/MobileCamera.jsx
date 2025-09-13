@@ -13,6 +13,7 @@ const MobileCamera = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [net, setNet] = useState(null);
   const [docBBox, setDocBBox] = useState(null); // {x,y,w,h}
+  const [selectedDeviceId, setSelectedDeviceId] = useState(null);
   const [ocrText, setOcrText] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
   const lastExtractHashRef = useRef(null);
@@ -290,6 +291,53 @@ const MobileCamera = () => {
     } catch (e) {}
   }, []);
 
+  // Try to enumerate devices and pick a rear camera deviceId if available
+  useEffect(() => {
+    const pickRearDevice = async () => {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+
+      try {
+        // Request temporary permission to get device labels on some browsers
+        let tempStream = null;
+        try {
+          tempStream = await navigator.mediaDevices.getUserMedia({ video: true });
+        } catch (err) {
+          // ignore: permission may be denied — we'll still try to enumerate
+        }
+
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videoInputs = devices.filter(d => d.kind === 'videoinput');
+
+        // Prefer devices whose label suggests a back/rear camera
+        const rearKeywords = ['back', 'rear', 'environment', 'rück', 'traseira'];
+        let found = null;
+        for (const d of videoInputs) {
+          const label = (d.label || '').toLowerCase();
+          if (rearKeywords.some(k => label.includes(k))) {
+            found = d;
+            break;
+          }
+        }
+
+        // Fallback: if only one camera, use it; otherwise prefer the last device (often rear)
+        if (!found && videoInputs.length === 1) found = videoInputs[0];
+        if (!found && videoInputs.length > 1) found = videoInputs[videoInputs.length - 1];
+
+        if (found) {
+          setSelectedDeviceId(found.deviceId);
+        }
+
+        if (tempStream) {
+          tempStream.getTracks().forEach(t => t.stop());
+        }
+      } catch (err) {
+        console.warn('Device enumeration failed', err);
+      }
+    };
+
+    pickRearDevice();
+  }, []);
+
   // Auto-extract OCR when a document bbox is stably detected
   useEffect(() => {
     // clear pending timer
@@ -383,7 +431,7 @@ const MobileCamera = () => {
             ref={webcamRef}
             audio={false}
             mirrored={cameraMode === 'user'}
-            videoConstraints={{ facingMode: cameraMode }}
+            videoConstraints={selectedDeviceId ? { deviceId: selectedDeviceId } : { facingMode: cameraMode }}
             style={{
               position: 'absolute',
               inset: 0,
