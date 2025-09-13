@@ -1,89 +1,91 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import Tesseract from "tesseract.js";
+import Webcam from "react-webcam";
 
 const SimpleMobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
   const [isActive, setIsActive] = useState(false);
-  const [stream, setStream] = useState(null);
   const [capturedImage, setCapturedImage] = useState(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [error, setError] = useState("");
-  
-  const videoRef = useRef(null);
+
+  const webcamRef = useRef(null);
   const canvasRef = useRef(null);
 
   // Check if device is mobile
   const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
 
-  // Start camera stream
-  const startCamera = useCallback(async () => {
-    try {
-      setError("");
-      
-      const constraints = {
-        video: {
-          facingMode: 'environment', // Use back camera on mobile
-          width: { ideal: 1280, max: 1920 },
-          height: { ideal: 720, max: 1080 },
-          aspectRatio: { ideal: 16/9 }
-        }
-      };
+  const videoConstraints = {
+    facingMode: { ideal: "environment" },
+    width: { ideal: 1280 },
+    height: { ideal: 720 }
+  };
 
-      const mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
-      setStream(mediaStream);
-      
-      if (videoRef.current) {
-        videoRef.current.srcObject = mediaStream;
-        videoRef.current.play();
+  const startCamera = useCallback(() => {
+    const doStart = async () => {
+      setError("");
+      // Preflight getUserMedia to surface errors early (permissions, not found, insecure context)
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setError('Camera API not supported in this browser');
+        return;
       }
-      
-      setIsActive(true);
-      
-    } catch (error) {
-      console.error('Camera access error:', error);
-      if (error.name === 'NotAllowedError') {
-        setError('Camera permission denied. Please allow camera access and try again.');
-      } else if (error.name === 'NotFoundError') {
-        setError('No camera found on this device.');
-      } else {
-        setError('Unable to access camera. Please check permissions.');
+
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints });
+        // We have permission; stop preflight tracks and let react-webcam attach when it mounts
+        stream.getTracks().forEach(t => t.stop());
+        setIsActive(true);
+      } catch (err) {
+        console.error('Preflight camera access error:', err);
+        if (err.name === 'NotAllowedError') {
+          setError('Camera permission denied. Please allow camera access and try again.');
+        } else if (err.name === 'NotFoundError') {
+          setError('No camera found on this device.');
+        } else {
+          setError('Unable to access camera. Make sure your connection is secure (HTTPS) and permissions are granted.');
+        }
       }
-    }
+    };
+
+    doStart();
   }, []);
 
-  // Stop camera stream
   const stopCamera = useCallback(() => {
-    if (stream) {
-      stream.getTracks().forEach(track => track.stop());
-      setStream(null);
+    try {
+      const video = webcamRef.current?.video;
+      if (video && video.srcObject) {
+        const stream = video.srcObject;
+        stream.getTracks().forEach(track => track.stop());
+      }
+    } catch (e) {
+      // ignore
     }
     setIsActive(false);
-  }, [stream]);
+  }, []);
 
-  // Capture image
   const captureImage = useCallback(async () => {
-    if (!videoRef.current) return;
+    try {
+      setError("");
+      if (!webcamRef.current) return;
 
-    const canvas = canvasRef.current;
-    const video = videoRef.current;
-    
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(video, 0, 0);
-    
-    // Convert to blob and process
-    canvas.toBlob(async (blob) => {
-      const imageUrl = URL.createObjectURL(blob);
-      setCapturedImage(imageUrl);
-      
-      // Process the captured image
+      const imageSrc = webcamRef.current.getScreenshot();
+      if (!imageSrc) {
+        setError('Failed to capture image');
+        return;
+      }
+
+      setCapturedImage(imageSrc);
+
+      // convert dataURL to blob
+      const res = await fetch(imageSrc);
+      const blob = await res.blob();
+
       await processImage(blob);
-    }, 'image/jpeg', 0.9);
-    
-    // Stop camera after capture
-    stopCamera();
+      stopCamera();
+    } catch (err) {
+      console.error('Capture error:', err);
+      setError('Failed to capture image');
+    }
   }, [stopCamera]);
 
   // Process captured image with OCR
@@ -92,7 +94,6 @@ const SimpleMobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
     setError("");
 
     try {
-      // Enhanced OCR processing for better accuracy
       const { data: { text } } = await Tesseract.recognize(imageBlob, "eng", {
         logger: m => console.log(m),
         tessedit_pageseg_mode: Tesseract.PSM.AUTO,
@@ -102,8 +103,7 @@ const SimpleMobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
       if (text.trim()) {
         const cleanText = text.trim();
         onTextExtracted?.(cleanText);
-        
-        // Generate AI solution
+
         if (onSolutionGenerated) {
           await generateAISolution(cleanText);
         }
@@ -116,6 +116,18 @@ const SimpleMobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
     } finally {
       setIsProcessing(false);
     }
+  };
+
+  const handleUserMediaError = (err) => {
+    console.error('Webcam user media error:', err);
+    if (err && err.name) {
+      if (err.name === 'NotAllowedError') setError('Camera permission denied. Please allow camera access.');
+      else if (err.name === 'NotFoundError') setError('No camera found on this device.');
+      else setError('Camera error: ' + (err.message || err.name));
+    } else {
+      setError('Unknown camera error');
+    }
+    setIsActive(false);
   };
 
   // Generate AI solution
@@ -203,18 +215,21 @@ const SimpleMobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
           animate={{ opacity: 1 }}
           className="relative w-full h-full"
         >
-          <video
-            ref={videoRef}
+          <Webcam
+            audio={false}
+            ref={webcamRef}
+            mirrored={false}
+            screenshotFormat="image/jpeg"
+            videoConstraints={videoConstraints}
+            onUserMediaError={handleUserMediaError}
             className="w-full h-full object-cover rounded-lg"
-            playsInline
-            muted
           />
-          
+
           {/* Camera ready indicator */}
           <div className="absolute top-4 left-4 bg-green-500 text-white px-3 py-1 rounded-full text-sm">
             📷 Camera Ready
           </div>
-          
+
           {/* Capture button */}
           <div className="absolute bottom-6 left-1/2 transform -translate-x-1/2 flex gap-4">
             <motion.button
@@ -226,7 +241,7 @@ const SimpleMobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
             >
               📸
             </motion.button>
-            
+
             <motion.button
               onClick={stopCamera}
               className="bg-red-500 text-white p-4 rounded-full shadow-lg"
@@ -262,7 +277,7 @@ const SimpleMobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
         </motion.div>
       )}
 
-      {/* Hidden canvas for processing */}
+      {/* Hidden canvas for processing (kept for compatibility) */}
       <canvas ref={canvasRef} style={{ display: 'none' }} />
     </div>
   );

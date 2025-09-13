@@ -1,704 +1,424 @@
-import { useState, useRef, useEffect, useCallback } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { useEffect, useRef, useState } from "react";
+import Webcam from "react-webcam";
+import * as tf from "@tensorflow/tfjs";
+import * as cocossd from "@tensorflow-models/coco-ssd";
 import Tesseract from "tesseract.js";
-import { isMobileDevice, hasCameraSupport, getMobileCameraConstraints, getYOLOConfig } from "../utils/deviceDetection";
-import { initializeTensorFlow, loadCocoSsdModel, optimizeForMobile } from "../utils/tensorflowSetup";
 
-const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
-  const [isActive, setIsActive] = useState(false);
-  const [stream, setStream] = useState(null);
-  const [capturedImage, setCapturedImage] = useState(null);
+const MobileCamera = () => {
+  const webcamRef = useRef(null);
+  const canvasRef = useRef(null); // overlay canvas
+  const tmpCanvasRef = useRef(document.createElement("canvas")); // offscreen
+
+  const [cameraMode, setCameraMode] = useState("user");
+  const [isLoading, setIsLoading] = useState(false);
+  const [net, setNet] = useState(null);
+  const [docBBox, setDocBBox] = useState(null); // {x,y,w,h}
+  const [ocrText, setOcrText] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
-  const [detectedObjects, setDetectedObjects] = useState([]);
-  const [isDetecting, setIsDetecting] = useState(false);
-  const [error, setError] = useState("");
-  
-  const videoRef = useRef(null);
-  const canvasRef = useRef(null);
-  const detectionCanvasRef = useRef(null);
-  const yoloModelRef = useRef(null);
+  const lastExtractHashRef = useRef(null);
+  const extractionTimerRef = useRef(null);
 
-  // Enhanced mobile detection and camera support check
-  const [isMobile, setIsMobile] = useState(false);
-  const [hasCameraAccess, setHasCameraAccess] = useState(false);
+  // initialize coco-ssd model and TF backend
+  const runCoco = async () => {
+    try {
+      setIsLoading(true);
+      await tf.setBackend("webgl");
+      await tf.ready();
+      const model = await cocossd.load();
+      setNet(model);
+      setIsLoading(false);
+    } catch (err) {
+      console.error('Failed to load model', err);
+      setIsLoading(false);
+    }
+  };
 
-  // Check device capabilities on mount
-  useEffect(() => {
-    const checkDeviceCapabilities = async () => {
-      const mobile = isMobileDevice();
-      const camera = await hasCameraSupport();
+  // Utility: draw overlay box
+  const drawOverlay = (bbox, score, label) => {
+    const canvas = canvasRef.current;
+    const video = webcamRef.current?.video;
+    if (!canvas || !video) return;
+    // Set canvas to video intrinsic size (so drawing coordinates match video pixels)
+    const ctx = canvas.getContext('2d');
+    const vidW = video.videoWidth || video.clientWidth;
+    const vidH = video.videoHeight || video.clientHeight;
+    canvas.width = vidW;
+    canvas.height = vidH;
+    // ensure canvas CSS covers the container
+    canvas.style.width = '100%';
+    canvas.style.height = '100%';
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      setIsMobile(mobile);
-      setHasCameraAccess(camera);
+    if (bbox) {
+  ctx.strokeStyle = '#00ff00';
+  ctx.lineWidth = Math.max(2, Math.round(4 * (canvas.width / 640)));
+  ctx.strokeRect(bbox.x, bbox.y, bbox.w, bbox.h);
 
-      if (!mobile) {
-        setError("Camera feature is optimized for mobile devices");
-      } else if (!camera) {
-        setError("Camera not available on this device");
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(bbox.x, Math.max(0, bbox.y - 24), Math.min(200, bbox.w), 22);
+      ctx.fillStyle = '#fff';
+      ctx.font = '16px sans-serif';
+      ctx.fillText(`${label || 'Document'} ${Math.round((score||0)*100)}%`, bbox.x + 6, Math.max(16, bbox.y - 6));
+    }
+  };
+
+  // Capture current frame to an offscreen canvas and return it
+  const captureFrameCanvas = () => {
+    const video = webcamRef.current?.video;
+    if (!video) return null;
+    const c = tmpCanvasRef.current;
+    c.width = video.videoWidth;
+    c.height = video.videoHeight;
+    const ctx = c.getContext('2d');
+    ctx.drawImage(video, 0, 0, c.width, c.height);
+    return c;
+  };
+
+  // Simple Sobel-based edge detector -> compute bounding box of strong-edge region
+  const findDocumentByEdges = (canvas) => {
+    try {
+      const w = canvas.width;
+      const h = canvas.height;
+      const ctx = canvas.getContext('2d');
+      const img = ctx.getImageData(0, 0, w, h);
+      const data = img.data;
+
+      // convert to grayscale
+      const gray = new Uint8ClampedArray(w * h);
+      for (let i = 0, j = 0; i < data.length; i += 4, j++) {
+        gray[j] = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) | 0;
       }
-    };
 
-    checkDeviceCapabilities();
+      // Sobel kernels
+      const gx = new Int16Array(w * h);
+      const gy = new Int16Array(w * h);
+      const mag = new Uint8ClampedArray(w * h);
+
+      const kernelX = [-1, 0, 1, -2, 0, 2, -1, 0, 1];
+      const kernelY = [-1, -2, -1, 0, 0, 0, 1, 2, 1];
+
+      for (let y = 1; y < h - 1; y++) {
+        for (let x = 1; x < w - 1; x++) {
+          let sumX = 0;
+          let sumY = 0;
+          let idx = 0;
+          for (let ky = -1; ky <= 1; ky++) {
+            for (let kx = -1; kx <= 1; kx++) {
+              const px = x + kx;
+              const py = y + ky;
+              const p = gray[py * w + px];
+              sumX += p * kernelX[idx];
+              sumY += p * kernelY[idx];
+              idx++;
+            }
+          }
+          const pos = y * w + x;
+          gx[pos] = sumX;
+          gy[pos] = sumY;
+          const g = Math.hypot(sumX, sumY);
+          mag[pos] = g > 255 ? 255 : g;
+        }
+      }
+
+      // threshold edges using Otsu-like estimate: mean
+      let sum = 0;
+      for (let i = 0; i < mag.length; i++) sum += mag[i];
+      const mean = sum / mag.length;
+      const thresh = Math.max(50, mean * 1.5);
+
+      // compute projection to find dense edge area
+      const colCounts = new Uint32Array(w);
+      const rowCounts = new Uint32Array(h);
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          if (mag[y * w + x] >= thresh) {
+            colCounts[x]++;
+            rowCounts[y]++;
+          }
+        }
+      }
+
+      // find contiguous region where counts exceed small percentage of width/height
+      const colThreshold = Math.max(2, h * 0.01);
+      const rowThreshold = Math.max(2, w * 0.01);
+
+      let minX = w, maxX = 0, minY = h, maxY = 0;
+      for (let x = 0; x < w; x++) {
+        if (colCounts[x] > colThreshold) {
+          minX = Math.min(minX, x);
+          maxX = Math.max(maxX, x);
+        }
+      }
+      for (let y = 0; y < h; y++) {
+        if (rowCounts[y] > rowThreshold) {
+          minY = Math.min(minY, y);
+          maxY = Math.max(maxY, y);
+        }
+      }
+
+      if (maxX - minX > 50 && maxY - minY > 50) {
+        // pad a little
+        const padX = Math.round((maxX - minX) * 0.05);
+        const padY = Math.round((maxY - minY) * 0.05);
+        const x = Math.max(0, minX - padX);
+        const y = Math.max(0, minY - padY);
+        const wbox = Math.min(w - x, maxX - minX + padX * 2);
+        const hbox = Math.min(h - y, maxY - minY + padY * 2);
+        return { x, y, w: wbox, h: hbox };
+      }
+
+      return null;
+    } catch (err) {
+      console.error('Edge detection failed', err);
+      return null;
+    }
+  };
+
+  // Main detection loop: prefer model detections, fallback to edge detection
+  const detectLoop = async () => {
+    if (!webcamRef.current || !webcamRef.current.video) return;
+    const video = webcamRef.current.video;
+    if (video.readyState !== 4) return;
+
+    const videoW = video.videoWidth;
+    const videoH = video.videoHeight;
+
+    // use model if loaded
+    if (net) {
+      try {
+        const preds = await net.detect(video);
+        // find document-like classes
+        const paperPreds = preds.filter(p => {
+          const cls = (p.class || '').toLowerCase();
+          return ['book','paper','document','notebook','magazine'].some(k => cls.includes(k));
+        });
+
+        if (paperPreds.length > 0) {
+          // select largest by area
+          const best = paperPreds.reduce((a,b) => (a.bbox[2]*a.bbox[3] > b.bbox[2]*b.bbox[3]) ? a : b);
+          const [x,y,w,h] = best.bbox;
+          const bbox = { x: Math.max(0, x), y: Math.max(0, y), w: Math.min(videoW - x, w), h: Math.min(videoH - y, h) };
+          setDocBBox(bbox);
+          drawOverlay(bbox, best.score, best.class);
+          return;
+        }
+      } catch (err) {
+        console.error('Model detection failed', err);
+      }
+    }
+
+    // fallback edge-based detection
+    const frame = captureFrameCanvas();
+    if (!frame) return;
+    const edgeBox = findDocumentByEdges(frame);
+    if (edgeBox) {
+      setDocBBox(edgeBox);
+      drawOverlay(edgeBox, 0, 'EdgeDetect');
+    } else {
+      setDocBBox(null);
+      // clear overlay
+      const canvas = canvasRef.current;
+      if (canvas) {
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0,0,canvas.width,canvas.height);
+      }
+    }
+  };
+
+  // Run continuous detection using requestAnimationFrame loop
+  useEffect(() => {
+    let raf = 0;
+    const loop = async () => {
+      await detectLoop();
+      raf = requestAnimationFrame(loop);
+    };
+    loop();
+    return () => cancelAnimationFrame(raf);
+  }, [net]);
+
+  // const runHandPose = async () => {
+  //   setisLoading(true);
+  //   await tf.setBackend("webgl");
+  //   await tf.ready();
+  //   console.log("Loading handpose model...");
+  //   const net = await handpose.load();
+  //   console.log("Handpose model loaded ✅");
+  //   setisLoading(false);
+  //   setInterval(() => {
+  //     detect1(net);
+  //   }, 100);
+  // };
+
+  const detect1 = async (net) => {
+    try {
+      if (
+        webcamRef1.current &&
+        webcamRef1.current.video &&
+        webcamRef1.current.video.readyState === 4
+      ) {
+        const video = webcamRef1.current.video;
+        const videoWidth = video.videoWidth;
+        const videoHeight = video.videoHeight;
+
+        video.width = videoWidth;
+        video.height = videoHeight;
+        canvasRef1.current.width = videoWidth;
+        canvasRef1.current.height = videoHeight;
+
+        const hands = await net.estimateHands(video);
+        // console.log(hands)
+        const ctx = canvasRef1.current.getContext("2d");
+        drawHands(hands, ctx);
+      }
+    } catch (err) {
+      console.error("Hand detection error:", err);
+    }
+  };
+
+  useEffect(() => {
+    runCoco();
   }, []);
 
-  // Load YOLO model with proper TensorFlow.js initialization
+  // Auto-extract OCR when a document bbox is stably detected
   useEffect(() => {
-    const loadYOLOModel = async () => {
-      if (!isMobile || !hasCameraAccess) return;
+    // clear pending timer
+    if (extractionTimerRef.current) {
+      clearTimeout(extractionTimerRef.current);
+      extractionTimerRef.current = null;
+    }
 
+    if (!docBBox) return;
+
+    const hash = `${Math.round(docBBox.x)}:${Math.round(docBBox.y)}:${Math.round(docBBox.w)}:${Math.round(docBBox.h)}`;
+    if (lastExtractHashRef.current === hash) return; // already extracted this bbox
+
+    // Wait briefly to ensure stable detection (debounce)
+    extractionTimerRef.current = setTimeout(async () => {
+      // double-check bbox still exists
+      if (!docBBox) return;
+      const currentHash = `${Math.round(docBBox.x)}:${Math.round(docBBox.y)}:${Math.round(docBBox.w)}:${Math.round(docBBox.h)}`;
+      if (lastExtractHashRef.current === currentHash) return;
       try {
-        console.log('📱 Initializing TensorFlow.js for mobile...');
+        setIsProcessing(true);
+        // capture and crop
+        const frame = captureFrameCanvas();
+        if (!frame) return;
+        const crop = document.createElement('canvas');
+        crop.width = Math.max(1, Math.round(docBBox.w));
+        crop.height = Math.max(1, Math.round(docBBox.h));
+        const cctx = crop.getContext('2d');
+        cctx.drawImage(frame, docBBox.x, docBBox.y, docBBox.w, docBBox.h, 0, 0, crop.width, crop.height);
 
-        // Initialize TensorFlow.js first
-        const tfReady = await initializeTensorFlow();
-        if (!tfReady) {
-          throw new Error('TensorFlow.js initialization failed');
+        // simple preprocessing: resize if big, convert to grayscale & stretch
+        const maxDim = 1600;
+        let proc = crop;
+        if (proc.width > maxDim || proc.height > maxDim) {
+          const scale = Math.min(maxDim / proc.width, maxDim / proc.height);
+          const resized = document.createElement('canvas');
+          resized.width = Math.round(proc.width * scale);
+          resized.height = Math.round(proc.height * scale);
+          const rctx = resized.getContext('2d');
+          rctx.drawImage(proc, 0, 0, resized.width, resized.height);
+          proc = resized;
         }
 
-        // Optimize for mobile devices
-        await optimizeForMobile();
-
-        // Load COCO-SSD model
-        console.log('📦 Loading COCO-SSD model...');
-        yoloModelRef.current = await loadCocoSsdModel();
-
-        if (yoloModelRef.current) {
-          console.log('✅ YOLO model loaded successfully for mobile device');
-        } else {
-          throw new Error('Model loading returned null');
+        const pctx = proc.getContext('2d');
+        const imgd = pctx.getImageData(0,0,proc.width,proc.height);
+        const d = imgd.data;
+        let min=255, max=0;
+        for (let i=0;i<d.length;i+=4){
+          const g = (d[i]*0.299 + d[i+1]*0.587 + d[i+2]*0.114)|0;
+          if (g<min) min=g; if (g>max) max=g;
         }
-
-      } catch (error) {
-        console.error('❌ Failed to load YOLO model:', error);
-        setError('Object detection unavailable. Camera will work without detection features.');
-        // Don't block camera functionality if YOLO fails
-      }
-    };
-
-    loadYOLOModel();
-  }, [isMobile, hasCameraAccess]);
-
-  // Start camera stream with optimized constraints
-  const startCamera = useCallback(async () => {
-    if (!isMobile || !hasCameraAccess) {
-      setError("Camera not available on this device");
-      return;
-    }
-
-    try {
-      setError("");
-      console.log('📱 Starting mobile camera...');
-
-      const constraints = getMobileCameraConstraints();
-      const mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
-
-      setStream(mediaStream);
-
-      if (videoRef.current) {
-        videoRef.current.srcObject = mediaStream;
-        await videoRef.current.play();
-        console.log('✅ Camera stream started successfully');
-      }
-
-      setIsActive(true);
-
-      // Start object detection after camera stabilizes
-      setTimeout(() => {
-        if (yoloModelRef.current) {
-          startObjectDetection();
-        } else {
-          console.log('⏳ Waiting for YOLO model to load...');
+        const range = Math.max(1, max-min);
+        for (let i=0;i<d.length;i+=4){
+          const g = (d[i]*0.299 + d[i+1]*0.587 + d[i+2]*0.114)|0;
+          const stretched = Math.min(255, Math.max(0, Math.round((g - min) * 255 / range)));
+          d[i]=d[i+1]=d[i+2]=stretched;
         }
-      }, 1500);
+        pctx.putImageData(imgd,0,0);
 
-    } catch (error) {
-      console.error('❌ Camera access error:', error);
-
-      // Provide specific error messages
-      if (error.name === 'NotAllowedError') {
-        setError('Camera permission denied. Please allow camera access and try again.');
-      } else if (error.name === 'NotFoundError') {
-        setError('No camera found on this device.');
-      } else if (error.name === 'NotReadableError') {
-        setError('Camera is being used by another application.');
-      } else {
-        setError('Unable to access camera. Please check permissions and try again.');
+        const blob = await new Promise(res => proc.toBlob(res, 'image/jpeg', 0.9));
+        const { data: { text } } = await Tesseract.recognize(blob, 'eng', { logger: m => {} });
+        setOcrText((text || '').trim());
+        lastExtractHashRef.current = currentHash;
+      } catch (err) {
+        console.error('Auto OCR failed', err);
+      } finally {
+        setIsProcessing(false);
       }
-    }
-  }, [isMobile, hasCameraAccess]);
-
-  // Stop camera stream
-  const stopCamera = useCallback(() => {
-    if (stream) {
-      stream.getTracks().forEach(track => track.stop());
-      setStream(null);
-    }
-    setIsActive(false);
-    setIsDetecting(false);
-    setDetectedObjects([]);
-  }, [stream]);
-
-  // Object detection function
-  const detectObjects = useCallback(async () => {
-    if (!yoloModelRef.current || !videoRef.current || !isActive) return;
-
-    try {
-      const predictions = await yoloModelRef.current.detect(videoRef.current);
-      
-      // Enhanced filtering for paper-like objects with better accuracy
-      const paperObjects = predictions.filter(prediction => {
-        const className = prediction.class.toLowerCase();
-
-        // Primary paper/document classes
-        const paperClasses = ['book', 'paper', 'document', 'notebook', 'magazine'];
-
-        // Secondary classes that might contain text
-        const textClasses = ['laptop', 'cell phone', 'tablet', 'monitor', 'tv'];
-
-        // Check for primary paper classes with lower threshold
-        const isPaperClass = paperClasses.some(cls => className.includes(cls));
-        if (isPaperClass && prediction.score > 0.2) return true;
-
-        // Check for secondary classes with higher threshold
-        const isTextClass = textClasses.some(cls => className.includes(cls));
-        if (isTextClass && prediction.score > 0.5) return true;
-
-        // Check for rectangular objects that might be papers
-        const [, , width, height] = prediction.bbox;
-        const aspectRatio = width / height;
-        const isRectangular = aspectRatio > 0.5 && aspectRatio < 2.0; // Reasonable paper aspect ratios
-        const isLargeEnough = width > 100 && height > 100; // Minimum size
-
-        return isRectangular && isLargeEnough && prediction.score > 0.4;
-      });
-
-      setDetectedObjects(paperObjects);
-      
-      // Draw detection boxes
-      drawDetectionBoxes(paperObjects);
-      
-    } catch (error) {
-      console.error('Object detection error:', error);
-    }
-  }, [isActive]);
-
-  // Start continuous object detection
-  const startObjectDetection = useCallback(() => {
-    if (!yoloModelRef.current) return;
-
-    setIsDetecting(true);
-
-    const detectLoop = () => {
-      if (isActive && yoloModelRef.current) {
-        detectObjects();
-        setTimeout(detectLoop, 500); // Detect every 500ms for performance
-      }
-    };
-
-    detectLoop();
-  }, [detectObjects, isActive]);
-
-  // Draw detection boxes on canvas
-  const drawDetectionBoxes = (objects) => {
-    const canvas = detectionCanvasRef.current;
-    const video = videoRef.current;
-
-    if (!canvas || !video || video.videoWidth === 0 || video.videoHeight === 0) return;
-
-    const ctx = canvas.getContext('2d');
-
-    // Set canvas size to match video display size
-    const rect = video.getBoundingClientRect();
-    canvas.width = rect.width;
-    canvas.height = rect.height;
-
-    // Calculate scaling factors
-    const scaleX = rect.width / video.videoWidth;
-    const scaleY = rect.height / video.videoHeight;
-
-    // Clear previous drawings
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    
-    // Draw detection boxes with enhanced visuals
-    objects.forEach((obj) => {
-      const [x, y, width, height] = obj.bbox;
-      const className = obj.class.toLowerCase();
-
-      // Scale coordinates to match canvas size
-      const scaledX = x * scaleX;
-      const scaledY = y * scaleY;
-      const scaledWidth = width * scaleX;
-      const scaledHeight = height * scaleY;
-
-      // Different colors for different object types
-      let boxColor = '#00ff00'; // Default green
-      let confidence = Math.round(obj.score * 100);
-
-      if (className.includes('book') || className.includes('paper') || className.includes('document')) {
-        boxColor = '#00ff00'; // Green for paper objects
-      } else if (className.includes('laptop') || className.includes('phone') || className.includes('tablet')) {
-        boxColor = '#ffaa00'; // Orange for electronic devices
-      }
-
-      // Draw bounding box with shadow for better visibility
-      ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
-      ctx.shadowBlur = 3;
-      ctx.shadowOffsetX = 2;
-      ctx.shadowOffsetY = 2;
-
-      ctx.strokeStyle = boxColor;
-      ctx.lineWidth = confidence > 70 ? 4 : 3;
-      ctx.setLineDash(confidence > 70 ? [] : [5, 5]); // Solid line for high confidence, dashed for low
-      ctx.strokeRect(scaledX, scaledY, scaledWidth, scaledHeight);
-      ctx.setLineDash([]); // Reset line dash
-
-      // Reset shadow
-      ctx.shadowColor = 'transparent';
-      ctx.shadowBlur = 0;
-      ctx.shadowOffsetX = 0;
-      ctx.shadowOffsetY = 0;
-
-      // Draw corner markers for better visibility
-      const cornerSize = 20;
-      ctx.strokeStyle = boxColor;
-      ctx.lineWidth = 3;
-
-      // Top-left corner
-      ctx.beginPath();
-      ctx.moveTo(scaledX, scaledY + cornerSize);
-      ctx.lineTo(scaledX, scaledY);
-      ctx.lineTo(scaledX + cornerSize, scaledY);
-      ctx.stroke();
-
-      // Top-right corner
-      ctx.beginPath();
-      ctx.moveTo(scaledX + scaledWidth - cornerSize, scaledY);
-      ctx.lineTo(scaledX + scaledWidth, scaledY);
-      ctx.lineTo(scaledX + scaledWidth, scaledY + cornerSize);
-      ctx.stroke();
-
-      // Bottom-left corner
-      ctx.beginPath();
-      ctx.moveTo(scaledX, scaledY + scaledHeight - cornerSize);
-      ctx.lineTo(scaledX, scaledY + scaledHeight);
-      ctx.lineTo(scaledX + cornerSize, scaledY + scaledHeight);
-      ctx.stroke();
-
-      // Bottom-right corner
-      ctx.beginPath();
-      ctx.moveTo(scaledX + scaledWidth - cornerSize, scaledY + scaledHeight);
-      ctx.lineTo(scaledX + scaledWidth, scaledY + scaledHeight);
-      ctx.lineTo(scaledX + scaledWidth, scaledY + scaledHeight - cornerSize);
-      ctx.stroke();
-
-      // Add pulsing effect for high confidence detections
-      if (confidence > 70) {
-        const pulseAlpha = 0.3 + 0.2 * Math.sin(Date.now() / 200);
-        ctx.fillStyle = `rgba(0, 255, 0, ${pulseAlpha})`;
-        ctx.fillRect(scaledX, scaledY, scaledWidth, scaledHeight);
-      }
-
-      // Draw label background with rounded corners
-      const labelText = `📄 ${obj.class} (${confidence}%)`;
-      ctx.font = 'bold 14px Arial';
-      const labelWidth = Math.max(150, ctx.measureText(labelText).width + 10);
-      const labelHeight = 25;
-
-      // Ensure label stays within canvas bounds
-      const labelX = Math.min(scaledX, canvas.width - labelWidth);
-      const labelY = Math.max(labelHeight, scaledY);
-
-      ctx.fillStyle = `rgba(0, 0, 0, 0.8)`;
-      ctx.fillRect(labelX, labelY - labelHeight, labelWidth, labelHeight);
-
-      // Draw label text
-      ctx.fillStyle = boxColor;
-      ctx.fillText(labelText, labelX + 5, labelY - 8);
-
-      // Draw accuracy indicator
-      if (confidence > 70) {
-        ctx.fillStyle = '#00ff00';
-        ctx.fillText('✓', labelX + labelWidth - 20, labelY - 8);
-      }
-
-      // Draw confidence bar
-      const barWidth = 60;
-      const barHeight = 4;
-      const barX = labelX + 5;
-      const barY = labelY - labelHeight + 18;
-
-      // Background bar
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
-      ctx.fillRect(barX, barY, barWidth, barHeight);
-
-      // Confidence bar
-      ctx.fillStyle = confidence > 70 ? '#00ff00' : confidence > 50 ? '#ffaa00' : '#ff4444';
-      ctx.fillRect(barX, barY, (barWidth * confidence) / 100, barHeight);
-    });
-  };
-
-  // Capture image with enhanced processing for detected papers
-  const captureImage = useCallback(async () => {
-    if (!videoRef.current) return;
-
-    const canvas = canvasRef.current;
-    const video = videoRef.current;
-    
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(video, 0, 0);
-    
-    // If paper objects detected, crop to the largest detected paper
-    let finalCanvas = canvas;
-    if (detectedObjects.length > 0) {
-      const largestPaper = detectedObjects.reduce((largest, current) => {
-        const currentArea = current.bbox[2] * current.bbox[3];
-        const largestArea = largest.bbox[2] * largest.bbox[3];
-        return currentArea > largestArea ? current : largest;
-      });
-      
-      // Create cropped canvas
-      const croppedCanvas = document.createElement('canvas');
-      const [x, y, width, height] = largestPaper.bbox;
-      
-      croppedCanvas.width = width;
-      croppedCanvas.height = height;
-      
-      const croppedCtx = croppedCanvas.getContext('2d');
-      croppedCtx.drawImage(canvas, x, y, width, height, 0, 0, width, height);
-      
-      finalCanvas = croppedCanvas;
-    }
-    
-    // Convert to blob and process
-    finalCanvas.toBlob(async (blob) => {
-      const imageUrl = URL.createObjectURL(blob);
-      setCapturedImage(imageUrl);
-      
-      // Process the captured image
-      await processImage(blob);
-    }, 'image/jpeg', 0.9);
-    
-    // Stop camera after capture
-    stopCamera();
-  }, [detectedObjects, stopCamera]);
-
-  // Enhanced image preprocessing for better OCR accuracy
-  const preprocessImage = (canvas) => {
-    const ctx = canvas.getContext('2d');
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const data = imageData.data;
-
-    // Convert to grayscale and enhance contrast
-    for (let i = 0; i < data.length; i += 4) {
-      // Grayscale conversion
-      const gray = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
-
-      // Enhance contrast (simple threshold)
-      const enhanced = gray > 128 ? 255 : 0;
-
-      data[i] = enhanced;     // Red
-      data[i + 1] = enhanced; // Green
-      data[i + 2] = enhanced; // Blue
-      // Alpha channel remains unchanged
-    }
-
-    ctx.putImageData(imageData, 0, 0);
-    return canvas;
-  };
-
-  // Process captured image with enhanced OCR
-  const processImage = async (imageBlob) => {
-    setIsProcessing(true);
-    setError("");
-
-    try {
-      // Create image element for preprocessing
-      const img = new Image();
-      const imageUrl = URL.createObjectURL(imageBlob);
-
-      img.onload = async () => {
-        // Create canvas for preprocessing
-        const preprocessCanvas = document.createElement('canvas');
-        preprocessCanvas.width = img.width;
-        preprocessCanvas.height = img.height;
-
-        const ctx = preprocessCanvas.getContext('2d');
-        ctx.drawImage(img, 0, 0);
-
-        // Apply preprocessing
-        const processedCanvas = preprocessImage(preprocessCanvas);
-
-        // Convert back to blob
-        processedCanvas.toBlob(async (processedBlob) => {
-          try {
-            // Enhanced OCR processing with multiple PSM modes for better accuracy
-            const ocrOptions = {
-              logger: m => console.log(m),
-              tessedit_pageseg_mode: Tesseract.PSM.AUTO,
-              preserve_interword_spaces: '1',
-              tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz+-=()[]{}.,;:!?/\\|<>@#$%^&*_~`"\' ',
-            };
-
-            const { data: { text } } = await Tesseract.recognize(processedBlob, "eng", ocrOptions);
-
-            if (text.trim()) {
-              const cleanText = text.trim();
-              onTextExtracted?.(cleanText);
-
-              // Generate AI solution
-              if (onSolutionGenerated) {
-                await generateAISolution(cleanText);
-              }
-            } else {
-              setError("No text found in captured image. Try capturing a clearer image with better lighting.");
-            }
-          } catch (ocrError) {
-            console.error('OCR processing error:', ocrError);
-            setError("Failed to extract text from image. Please try again with better lighting.");
-          } finally {
-            setIsProcessing(false);
-          }
-        }, 'image/jpeg', 0.9);
-
-        // Cleanup
-        URL.revokeObjectURL(imageUrl);
-      };
-
-      img.src = imageUrl;
-
-    } catch (error) {
-      console.error('Image processing error:', error);
-      setError("Failed to process captured image");
-      setIsProcessing(false);
-    }
-  };
-
-  // Generate AI solution (simplified version)
-  const generateAISolution = async (text) => {
-    try {
-      const apiUrl = `${import.meta.env.VITE_API_URL || "http://localhost:5000/api"}/stream-solution`;
-      
-      const response = await fetch(apiUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        credentials: 'include',
-        body: JSON.stringify({ text })
-      });
-
-      if (response.ok) {
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let accumulatedText = '';
-        
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          
-          const chunk = decoder.decode(value, { stream: true });
-          if (chunk) {
-            accumulatedText += chunk;
-          }
-        }
-        
-        onSolutionGenerated?.(accumulatedText);
-      }
-    } catch (error) {
-      console.error('AI solution error:', error);
-    }
-  };
-
-  // Handle video resize for canvas overlay
-  useEffect(() => {
-    const video = videoRef.current;
-    const canvas = detectionCanvasRef.current;
-
-    if (!video || !canvas) return;
-
-    const handleResize = () => {
-      const rect = video.getBoundingClientRect();
-      canvas.width = rect.width;
-      canvas.height = rect.height;
-    };
-
-    // Initial resize
-    handleResize();
-
-    // Listen for video metadata loaded
-    video.addEventListener('loadedmetadata', handleResize);
-    video.addEventListener('resize', handleResize);
-
-    // Use ResizeObserver if available
-    let resizeObserver;
-    if (window.ResizeObserver) {
-      resizeObserver = new ResizeObserver(handleResize);
-      resizeObserver.observe(video);
-    }
+    }, 800);
 
     return () => {
-      video.removeEventListener('loadedmetadata', handleResize);
-      video.removeEventListener('resize', handleResize);
-      if (resizeObserver) {
-        resizeObserver.disconnect();
+      if (extractionTimerRef.current) {
+        clearTimeout(extractionTimerRef.current);
+        extractionTimerRef.current = null;
       }
     };
-  }, [isActive]);
+  }, [docBBox]);
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      stopCamera();
-    };
-  }, [stopCamera]);
-
-  // Don't render on desktop
-  if (!isMobile) {
-    return null;
-  }
+  // Note: OCR/capture removed — component now only shows preview + toggle
 
   return (
-    <div className="mobile-camera-container">
-      <AnimatePresence>
-        {!isActive && !capturedImage && (
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -20 }}
-            className="text-center p-6"
-          >
-            <div className="mb-6">
-              <div className="text-6xl mb-4">📱</div>
-              <h3 className="text-xl font-semibold mb-2">Mobile Camera</h3>
-              <p className="text-gray-600 dark:text-gray-400 mb-4">
-                Use your camera to capture documents and papers with AI-powered object detection
-              </p>
-            </div>
-            
-            <motion.button
-              onClick={startCamera}
-              className="bg-blue-500 hover:bg-blue-600 text-white px-6 py-3 rounded-lg font-medium transition-colors"
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
-            >
-              📷 Start Camera
-            </motion.button>
-          </motion.div>
-        )}
-      </AnimatePresence>
+    <div>
+      <div className="min-h-screen bg-gray-100 dark:bg-gray-900 flex flex-col items-center justify-center gap-4 p-4">
+        <h1 className={`text-2xl text-white font-bold mb-2`}>
+          Document Scanner
+        </h1>
+        <p className="text-sm text-gray-200 mb-4">{isLoading ? 'Loading model...' : 'Point camera at a page or document'}</p>
 
-      {/* Camera View */}
-      {isActive && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="relative w-full h-full"
-        >
-          <video
-            ref={videoRef}
-            className="w-full h-full object-cover rounded-lg"
-            playsInline
-            muted
-          />
-          
-          {/* Detection overlay */}
-          <canvas
-            ref={detectionCanvasRef}
-            className="absolute top-0 left-0 w-full h-full pointer-events-none"
+        <div className="relative w-full max-w-md md:max-w-3xl bg-black rounded-lg overflow-hidden shadow-lg" style={{aspectRatio: '4/3'}}>
+          <Webcam
+            ref={webcamRef}
+            audio={false}
+            mirrored={cameraMode === 'user'}
+            videoConstraints={{ facingMode: cameraMode }}
             style={{
+              position: 'absolute',
+              inset: 0,
+              width: '100%',
+              height: '100%',
               zIndex: 10,
-              objectFit: 'cover'
+              objectFit: 'cover',
+              borderRadius: 'inherit'
             }}
           />
-          
-          {/* Detection status */}
-          {yoloModelRef.current && isDetecting && (
-            <div className="absolute top-4 left-4 flex flex-col gap-2">
-              <div className="bg-green-500 text-white px-3 py-1 rounded-full text-sm flex items-center gap-2">
-                <div className="w-2 h-2 bg-white rounded-full animate-pulse"></div>
-                🎯 Detecting: {detectedObjects.length} objects
-              </div>
-              {detectedObjects.length > 0 && (
-                <div className="bg-blue-500 text-white px-3 py-1 rounded-full text-xs">
-                  📄 {detectedObjects.filter(obj =>
-                    obj.class.toLowerCase().includes('book') ||
-                    obj.class.toLowerCase().includes('paper') ||
-                    obj.class.toLowerCase().includes('document')
-                  ).length} papers detected
-                </div>
-              )}
-            </div>
-          )}
 
-          {/* Fallback message when YOLO is not available */}
-          {!yoloModelRef.current && isActive && (
-            <div className="absolute top-4 left-4 bg-blue-500 text-white px-3 py-1 rounded-full text-sm">
-              📷 Camera Ready (Basic Mode)
-            </div>
-          )}
+          <canvas
+            ref={canvasRef}
+            style={{
+              position: 'absolute',
+              inset: 0,
+              width: '100%',
+              height: '100%',
+              zIndex: 12,
+              pointerEvents: 'none'
+            }}
+          />
+        </div>
 
-          {/* Instructions overlay */}
-          {isActive && (
-            <div className="absolute bottom-20 left-1/2 transform -translate-x-1/2 bg-black bg-opacity-50 text-white px-4 py-2 rounded-lg text-sm text-center">
-              {detectedObjects.length > 0 ?
-                "📄 Paper detected! Tap capture to extract text" :
-                "📱 Point camera at documents or papers"
-              }
-            </div>
-          )}
-          
-          {/* Capture button */}
-          <div className="absolute bottom-6 left-1/2 transform -translate-x-1/2 flex gap-4">
-            <motion.button
-              onClick={captureImage}
-              className="bg-white text-gray-800 p-4 rounded-full shadow-lg"
-              whileHover={{ scale: 1.1 }}
-              whileTap={{ scale: 0.9 }}
-              disabled={isProcessing}
-            >
-              📸
-            </motion.button>
-            
-            <motion.button
-              onClick={stopCamera}
-              className="bg-red-500 text-white p-4 rounded-full shadow-lg"
-              whileHover={{ scale: 1.1 }}
-              whileTap={{ scale: 0.9 }}
-            >
-              ❌
-            </motion.button>
+        <div className="flex items-center justify-between gap-4 mt-3 w-full max-w-md md:max-w-3xl">
+          <button
+            onClick={() => setCameraMode(prev => prev === 'user' ? 'environment' : 'user')}
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-full shadow-md"
+            disabled={isLoading}
+            style={{minWidth: 160}}
+          >
+            {cameraMode === 'user' ? 'Use Rear Camera' : 'Use Front Camera'}
+          </button>
+
+          <div className="text-sm text-gray-300">{isLoading ? 'Model loading...' : 'Preview active'}</div>
+        </div>
+        <div className="w-full max-w-md md:max-w-3xl mt-4 bg-white bg-opacity-80 dark:bg-black/60 p-3 rounded-lg shadow-inner">
+          <div className="flex items-center justify-between mb-2">
+            <h4 className="text-sm font-semibold">Extracted Text</h4>
+            <div className="text-xs text-gray-500">{isProcessing ? 'Scanning...' : (ocrText ? 'Done' : 'Waiting')}</div>
           </div>
-        </motion.div>
-      )}
-
-      {/* Processing state */}
-      {isProcessing && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="text-center p-6"
-        >
-          <div className="animate-spin text-4xl mb-4">🔄</div>
-          <p>Processing captured image...</p>
-        </motion.div>
-      )}
-
-      {/* Error display */}
-      {error && (
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4"
-        >
-          {error}
-        </motion.div>
-      )}
-
-      {/* Hidden canvases for processing */}
-      <canvas ref={canvasRef} style={{ display: 'none' }} />
+          <div className="min-h-[60px] text-sm text-gray-800 dark:text-gray-200 break-words whitespace-pre-wrap">
+            {ocrText || 'No text extracted yet. Point camera at a page.'}
+          </div>
+        </div>
+      </div>
     </div>
   );
 };
