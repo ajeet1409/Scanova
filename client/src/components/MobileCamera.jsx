@@ -402,70 +402,132 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
   // Note: OCR/capture is automatic when a document bbox is detected
 
   return (
-    <div>
-      <div className="min-h-screen bg-gray-100 dark:bg-gray-900 flex flex-col items-center justify-center gap-4 p-4">
-        <h1 className={`text-2xl text-white font-bold mb-2`}>
-          Document Scanner
-        </h1>
-        <p className="text-sm text-gray-200 mb-4">{isLoading ? 'Loading model...' : 'Point camera at a page or document'}</p>
+    <div className="relative w-full h-full">
+      {/* Camera Preview Container */}
+      <div className="relative w-full bg-gradient-to-br from-gray-900 to-black rounded-2xl overflow-hidden shadow-2xl">
+        {/* Header */}
+        <div className="absolute top-0 left-0 right-0 z-30 camera-overlay bg-gradient-to-b from-black/70 to-transparent p-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-3 h-3 bg-green-500 rounded-full camera-status-indicator"></div>
+              <h1 className="text-white font-semibold text-lg">
+                📄 Document Scanner
+              </h1>
+            </div>
+            <div className="text-white/80 text-sm bg-black/30 px-3 py-1 rounded-full">
+              {isLoading ? '🔄 Loading...' : '✨ Ready'}
+            </div>
+          </div>
+          <p className="text-white/70 text-sm mt-2">
+            {isLoading ? 'Initializing AI model...' : 'Position a document in the camera view for automatic scanning'}
+          </p>
+        </div>
 
-  <div className="relative w-full max-w-md md:max-w-3xl bg-black rounded-lg overflow-hidden shadow-lg mx-auto" style={{aspectRatio: '4/3'}}>
+        {/* Camera View */}
+        <div className="relative w-full aspect-[4/3] bg-black">
           <Webcam
             ref={webcamRef}
             audio={false}
             mirrored={cameraMode === 'user'}
             videoConstraints={selectedDeviceId ? { deviceId: selectedDeviceId } : { facingMode: cameraMode }}
-            style={{
-              position: 'absolute',
-              inset: 0,
-              width: '100%',
-              height: '100%',
-              zIndex: 10,
-              objectFit: 'cover',
-              borderRadius: 'inherit'
-            }}
+            className="absolute inset-0 w-full h-full object-cover"
+            style={{ zIndex: 10 }}
           />
 
+          {/* Overlay Canvas for Document Detection */}
           <canvas
             ref={canvasRef}
-            style={{
-              position: 'absolute',
-              inset: 0,
-              width: '100%',
-              height: '100%',
-              zIndex: 12,
-              pointerEvents: 'none'
-            }}
+            className="absolute inset-0 w-full h-full pointer-events-none"
+            style={{ zIndex: 12 }}
           />
-          {/* Mobile overlay toggle (inside preview) */}
-          <button
-            onClick={() => setCameraMode(prev => prev === 'user' ? 'environment' : 'user')}
-            className="absolute bottom-3 right-3 z-20 bg-white bg-opacity-80 text-sm text-gray-800 px-3 py-2 rounded-full shadow"
-            style={{backdropFilter: 'blur(6px)'}}
-          >
-            {cameraMode === 'user' ? 'Rear' : 'Front'}
-          </button>
-        </div>
 
-        <div className="flex items-center justify-between gap-4 mt-3 w-full max-w-md md:max-w-3xl">
-          <button
-            onClick={() => setCameraMode(prev => prev === 'user' ? 'environment' : 'user')}
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-full shadow-md"
-            disabled={isLoading}
-            style={{minWidth: 160}}
-          >
-            {cameraMode === 'user' ? 'Use Rear Camera' : 'Use Front Camera'}
-          </button>
+          {/* Camera Controls Overlay */}
+          <div className="absolute bottom-4 left-4 right-4 z-20 flex items-center justify-between">
+            {/* Camera Switch Button */}
+            <button
+              onClick={() => setCameraMode(prev => prev === 'user' ? 'environment' : 'user')}
+              className="camera-overlay camera-button-hover bg-white/20 text-white px-4 py-2 rounded-full border border-white/30 hover:bg-white/30 transition-all duration-200 shadow-lg"
+              disabled={isLoading}
+            >
+              <span className="flex items-center gap-2">
+                🔄 {cameraMode === 'user' ? 'Switch to Rear' : 'Switch to Front'}
+              </span>
+            </button>
 
-          <div className="text-sm text-gray-300">{isLoading ? 'Model loading...' : 'Preview active'}</div>
-        </div>
-        <div className="w-full max-w-md md:max-w-3xl mt-4 bg-white bg-opacity-80 dark:bg-black/60 p-3 rounded-lg shadow-inner">
-          <div className="flex items-center justify-between mb-2">
-            <h4 className="text-sm font-semibold">Extracted Text</h4>
-            <div className="text-xs text-gray-500">{isProcessing ? 'Scanning...' : (ocrText ? 'Done' : 'Waiting')}</div>
+            {/* Status Indicator */}
+            <div className="camera-overlay bg-black/50 text-white px-4 py-2 rounded-full text-sm border border-white/20">
+              {isProcessing ? (
+                <span className="flex items-center gap-2">
+                  <div className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse"></div>
+                  🔍 Scanning...
+                </span>
+              ) : docBBox ? (
+                <span className="flex items-center gap-2">
+                  <div className="w-2 h-2 bg-green-400 rounded-full"></div>
+                  ✅ Document Found
+                </span>
+              ) : (
+                <span className="flex items-center gap-2">
+                  <div className="w-2 h-2 bg-blue-400 rounded-full animate-pulse"></div>
+                  🔍 Searching...
+                </span>
+              )}
+            </div>
           </div>
-          <div className="min-h-[60px] text-sm text-gray-800 dark:text-gray-200 break-words whitespace-pre-wrap">
-            {ocrText || 'No text extracted yet. Point camera at a page.'}
+
+          {/* Loading Overlay */}
+          {isLoading && (
+            <div className="absolute inset-0 camera-overlay bg-black/90 flex items-center justify-center z-25">
+              <div className="text-center text-white">
+                <div className="relative">
+                  <div className="animate-spin rounded-full h-16 w-16 border-4 border-white/20 border-t-white mx-auto mb-4"></div>
+                  <div className="absolute inset-0 flex items-center justify-center">
+                    <div className="text-2xl">🤖</div>
+                  </div>
+                </div>
+                <p className="text-xl font-medium mb-2">Loading AI Model</p>
+                <p className="text-sm text-white/70">Preparing document detection...</p>
+                <div className="mt-4 flex justify-center space-x-1">
+                  <div className="w-2 h-2 bg-white rounded-full animate-bounce"></div>
+                  <div className="w-2 h-2 bg-white rounded-full animate-bounce" style={{animationDelay: '0.1s'}}></div>
+                  <div className="w-2 h-2 bg-white rounded-full animate-bounce" style={{animationDelay: '0.2s'}}></div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Extracted Text Panel */}
+        <div className="bg-gradient-to-r from-gray-800 via-gray-900 to-gray-800 p-4 border-t border-gray-700/50">
+          <div className="flex items-center justify-between mb-3">
+            <h4 className="text-white font-medium flex items-center gap-2">
+              📝 Extracted Text
+              {isProcessing && <div className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse"></div>}
+            </h4>
+            <div className="text-xs text-gray-400 bg-gray-700/50 px-3 py-1 rounded-full border border-gray-600">
+              {isProcessing ? (
+                <span className="flex items-center gap-1">
+                  <div className="w-1 h-1 bg-yellow-400 rounded-full animate-pulse"></div>
+                  Processing...
+                </span>
+              ) : ocrText ? (
+                <span className="text-green-400">{ocrText.length} characters</span>
+              ) : (
+                <span className="text-gray-500">Waiting</span>
+              )}
+            </div>
+          </div>
+          <div className="bg-gray-900/70 rounded-xl p-4 min-h-[100px] max-h-40 overflow-y-auto border border-gray-700/50">
+            <div className="text-sm text-gray-200 break-words whitespace-pre-wrap leading-relaxed">
+              {ocrText ? (
+                <span className="text-gray-100">{ocrText}</span>
+              ) : (
+                <span className="text-gray-500 italic flex items-center gap-2">
+                  <div className="text-lg">👁️</div>
+                  No text detected yet. Position a document clearly in the camera view for automatic scanning.
+                </span>
+              )}
+            </div>
           </div>
         </div>
       </div>

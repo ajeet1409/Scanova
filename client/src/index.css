@@ -47,6 +47,42 @@ body {
   scrollbar-color: #3b82f6 #1e293b;
 }
 
+/* Camera Interface Enhancements */
+.camera-overlay {
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.camera-status-indicator {
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+.document-detection-box {
+  border: 2px solid #10b981;
+  box-shadow: 0 0 20px rgba(16, 185, 129, 0.3);
+  animation: document-found 0.5s ease-out;
+}
+
+@keyframes document-found {
+  0% {
+    transform: scale(0.95);
+    opacity: 0.7;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.camera-button-hover {
+  transition: all 0.2s ease-in-out;
+}
+
+.camera-button-hover:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
 /* Hide scrollbar utility class */
 .scrollbar-hide {
   /* Hide scrollbar for Chrome, Safari and Opera */

@@ -404,46 +404,41 @@ const ImageUpload = ({ onTextExtracted, onSolutionGenerated }) => {
 
   return (
     <div className="max-w-7xl mx-auto px-4">
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-        {/* Upload Section */}
+      {/* Camera Full-Screen Mode */}
+      {isMobile && activeTab === "camera" ? (
         <motion.div
-          className="bg-white dark:bg-gray-900 p-6 rounded-2xl shadow-lg border border-gray-200 dark:border-gray-700"
-          initial={{ opacity: 0, x: -20 }}
-          animate={{ opacity: 1, x: 0 }}
+          className="fixed inset-0 z-50 bg-gradient-to-br from-gray-900 via-black to-gray-900"
+          initial={{ opacity: 0, scale: 0.95, y: 20 }}
+          animate={{ opacity: 1, scale: 1, y: 0 }}
+          exit={{ opacity: 0, scale: 0.95, y: 20 }}
+          transition={{ duration: 0.4, ease: "easeOut" }}
         >
-          {/* Tab Navigation - Show only on mobile */}
-          {isMobile && (
-            <div className="flex mb-6 bg-gray-100 dark:bg-gray-800 rounded-lg p-1">
+          {/* Camera Header */}
+          <div className="absolute top-0 left-0 right-0 z-60 bg-gradient-to-b from-black/90 via-black/50 to-transparent p-4 pt-8">
+            <div className="flex items-center justify-between">
               <button
                 onClick={() => setActiveTab("upload")}
-                className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition-colors ${
-                  activeTab === "upload"
-                    ? "bg-white dark:bg-gray-700 text-blue-600 dark:text-blue-400 shadow-sm"
-                    : "text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200"
-                }`}
+                className="camera-overlay camera-button-hover bg-white/20 text-white px-6 py-3 rounded-full border border-white/30 hover:bg-white/30 transition-all duration-200 shadow-lg"
               >
-                📁 Upload
+                <span className="flex items-center gap-2">
+                  ← Back to Upload
+                </span>
               </button>
-              <button
-                onClick={() => setActiveTab("camera")}
-                className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition-colors ${
-                  activeTab === "camera"
-                    ? "bg-white dark:bg-gray-700 text-blue-600 dark:text-blue-400 shadow-sm"
-                    : "text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200"
-                }`}
-              >
-                📱 Camera
-              </button>
+              <h2 className="text-white font-bold text-xl bg-black/30 px-4 py-2 rounded-full">
+                📱 Live Scanner
+              </h2>
+              <div className="w-32"></div> {/* Spacer for centering */}
             </div>
-          )}
+            <div className="text-center mt-2">
+              <p className="text-white/80 text-sm">
+                Point your camera at any document for instant text extraction
+              </p>
+            </div>
+          </div>
 
-          <h2 className="text-xl font-bold text-gray-800 dark:text-gray-100 mb-6">
-            {isMobile && activeTab === "camera" ? "Mobile Camera" : "Upload Image"}
-          </h2>
-
-          {/* Mobile Camera Component */}
-          {isMobile && activeTab === "camera" ? (
-            <div className="h-96">
+          {/* Full-Screen Camera */}
+          <div className="h-full pt-24 pb-4 px-4">
+            <div className="h-full max-w-4xl mx-auto">
               <MobileCamera
                 onTextExtracted={(text) => {
                   setExtractedText(text);
@@ -455,8 +450,53 @@ const ImageUpload = ({ onTextExtracted, onSolutionGenerated }) => {
                 }}
               />
             </div>
-          ) : (
-            /* File Upload Interface */
+          </div>
+        </motion.div>
+      ) : (
+        /* Regular Layout */
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+          {/* Upload Section */}
+          <motion.div
+            className="bg-white dark:bg-gray-900 p-6 rounded-2xl shadow-lg border border-gray-200 dark:border-gray-700"
+            initial={{ opacity: 0, x: -20 }}
+            animate={{ opacity: 1, x: 0 }}
+          >
+            {/* Tab Navigation - Show only on mobile */}
+            {isMobile && (
+              <div className="flex mb-6 bg-gradient-to-r from-gray-100 to-gray-50 dark:from-gray-800 dark:to-gray-700 rounded-xl p-1 shadow-inner">
+                <button
+                  onClick={() => setActiveTab("upload")}
+                  className={`flex-1 py-3 px-4 rounded-lg text-sm font-medium transition-all duration-200 ${
+                    activeTab === "upload"
+                      ? "bg-white dark:bg-gray-600 text-blue-600 dark:text-blue-400 shadow-lg transform scale-105"
+                      : "text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 hover:bg-white/50 dark:hover:bg-gray-600/50"
+                  }`}
+                >
+                  <span className="flex items-center justify-center gap-2">
+                    📁 Upload File
+                  </span>
+                </button>
+                <button
+                  onClick={() => setActiveTab("camera")}
+                  className={`flex-1 py-3 px-4 rounded-lg text-sm font-medium transition-all duration-200 ${
+                    activeTab === "camera"
+                      ? "bg-gradient-to-r from-blue-500 to-purple-600 text-white shadow-lg transform scale-105"
+                      : "text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 hover:bg-gradient-to-r hover:from-blue-50 hover:to-purple-50 dark:hover:from-blue-900/20 dark:hover:to-purple-900/20"
+                  }`}
+                >
+                  <span className="flex items-center justify-center gap-2">
+                    📱 Live Camera
+                    <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
+                  </span>
+                </button>
+              </div>
+            )}
+
+            <h2 className="text-xl font-bold text-gray-800 dark:text-gray-100 mb-6">
+              Upload Image
+            </h2>
+
+            {/* File Upload Interface */}
             <label className="flex flex-col items-center justify-center w-full h-40 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-xl cursor-pointer bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 transition-all duration-300">
               <div className="text-center">
                 <div className="text-3xl mb-2">📁</div>
@@ -465,7 +505,7 @@ const ImageUpload = ({ onTextExtracted, onSolutionGenerated }) => {
                 </span>
                 {isMobile && (
                   <div className="text-xs text-gray-500 mt-1">
-                    Or switch to Camera tab for live capture
+                    Or use Camera tab for live capture
                   </div>
                 )}
               </div>
@@ -476,7 +516,6 @@ const ImageUpload = ({ onTextExtracted, onSolutionGenerated }) => {
                 className="hidden"
               />
             </label>
-          )}
 
           {/* Image Preview */}
           {previewUrl && (
@@ -518,10 +557,10 @@ const ImageUpload = ({ onTextExtracted, onSolutionGenerated }) => {
               <p className="text-red-600 dark:text-red-400 text-center">{error}</p>
             </motion.div>
           )}
-        </motion.div>
+          </motion.div>
 
-        {/* Results Section - Show when processing or text is extracted */}
-        {(extractedText || isProcessing) ? (
+          {/* Results Section - Show when processing or text is extracted */}
+          {(extractedText || isProcessing) ? (
           <motion.div
             className="bg-white dark:bg-gray-900 p-6 rounded-2xl shadow-lg border border-gray-200 dark:border-gray-700"
             initial={{ opacity: 0, x: 20 }}
@@ -685,7 +724,8 @@ const ImageUpload = ({ onTextExtracted, onSolutionGenerated }) => {
             </div>
           </motion.div>
         )}
-      </div>
+        </div>
+      )}
     </div>
   );
 };
