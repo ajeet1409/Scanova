@@ -4,12 +4,13 @@ import * as tf from "@tensorflow/tfjs";
 import * as cocossd from "@tensorflow-models/coco-ssd";
 import Tesseract from "tesseract.js";
 
-const MobileCamera = () => {
+const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
   const webcamRef = useRef(null);
   const canvasRef = useRef(null); // overlay canvas
   const tmpCanvasRef = useRef(document.createElement("canvas")); // offscreen
 
-  const [cameraMode, setCameraMode] = useState("user");
+  // default to rear camera
+  const [cameraMode, setCameraMode] = useState("environment");
   const [isLoading, setIsLoading] = useState(false);
   const [net, setNet] = useState(null);
   const [docBBox, setDocBBox] = useState(null); // {x,y,w,h}
@@ -250,32 +251,6 @@ const MobileCamera = () => {
   //   }, 100);
   // };
 
-  const detect1 = async (net) => {
-    try {
-      if (
-        webcamRef1.current &&
-        webcamRef1.current.video &&
-        webcamRef1.current.video.readyState === 4
-      ) {
-        const video = webcamRef1.current.video;
-        const videoWidth = video.videoWidth;
-        const videoHeight = video.videoHeight;
-
-        video.width = videoWidth;
-        video.height = videoHeight;
-        canvasRef1.current.width = videoWidth;
-        canvasRef1.current.height = videoHeight;
-
-        const hands = await net.estimateHands(video);
-        // console.log(hands)
-        const ctx = canvasRef1.current.getContext("2d");
-        drawHands(hands, ctx);
-      }
-    } catch (err) {
-      console.error("Hand detection error:", err);
-    }
-  };
-
   useEffect(() => {
     runCoco();
   }, []);
@@ -399,8 +374,16 @@ const MobileCamera = () => {
 
         const blob = await new Promise(res => proc.toBlob(res, 'image/jpeg', 0.9));
         const { data: { text } } = await Tesseract.recognize(blob, 'eng', { logger: m => {} });
-        setOcrText((text || '').trim());
+        const clean = (text || '').trim();
+        setOcrText(clean);
         lastExtractHashRef.current = currentHash;
+        // notify parent
+        try {
+          onTextExtracted?.(clean);
+        } catch (e) {}
+        try {
+          onSolutionGenerated?.(clean);
+        } catch (e) {}
       } catch (err) {
         console.error('Auto OCR failed', err);
       } finally {
@@ -416,7 +399,7 @@ const MobileCamera = () => {
     };
   }, [docBBox]);
 
-  // Note: OCR/capture removed — component now only shows preview + toggle
+  // Note: OCR/capture is automatic when a document bbox is detected
 
   return (
     <div>
