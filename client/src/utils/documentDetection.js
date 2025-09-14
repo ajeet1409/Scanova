@@ -27,12 +27,35 @@ export const detectDocument = (canvas, options = {}) => {
     combineResults = true
   } = options;
 
-  const ctx = canvas.getContext('2d');
-  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const { width, height } = imageData;
+  // Validate canvas
+  if (!canvas || !canvas.getContext) {
+    console.warn('Invalid canvas provided to detectDocument');
+    return null;
+  }
 
-  // Convert to grayscale
-  const grayData = toGrayscale(imageData);
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    console.warn('Could not get 2D context from canvas');
+    return null;
+  }
+
+  const { width, height } = canvas;
+
+  // Validate dimensions
+  if (width <= 0 || height <= 0 || width > 4000 || height > 4000) {
+    console.warn('Invalid canvas dimensions:', { width, height });
+    return null;
+  }
+
+  try {
+    const imageData = ctx.getImageData(0, 0, width, height);
+
+    // Convert to grayscale with validation
+    const grayData = toGrayscale(imageData);
+    if (!grayData || grayData.length !== width * height) {
+      console.warn('Failed to convert image to grayscale');
+      return null;
+    }
 
   const results = [];
 
@@ -117,20 +140,32 @@ export const detectDocument = (canvas, options = {}) => {
  */
 const enhancedEdgeDetection = (grayData, width, height, minArea) => {
   try {
-    // Apply Gaussian blur to reduce noise
-    const imageData = new ImageData(new Uint8ClampedArray(width * height * 4), width, height);
-    for (let i = 0; i < grayData.length; i++) {
-      const idx = i * 4;
-      imageData.data[idx] = imageData.data[idx + 1] = imageData.data[idx + 2] = grayData[i];
-      imageData.data[idx + 3] = 255;
+    // Validate inputs
+    if (!grayData || width <= 0 || height <= 0 || grayData.length !== width * height) {
+      console.warn('Invalid parameters for enhancedEdgeDetection');
+      return null;
     }
+
+    // Apply Gaussian blur to reduce noise
+    const totalPixels = width * height;
+    const imageDataArray = new Uint8ClampedArray(totalPixels * 4);
+
+    for (let i = 0; i < grayData.length && i < totalPixels; i++) {
+      const idx = i * 4;
+      const grayValue = Math.max(0, Math.min(255, grayData[i]));
+      imageDataArray[idx] = imageDataArray[idx + 1] = imageDataArray[idx + 2] = grayValue;
+      imageDataArray[idx + 3] = 255;
+    }
+
+    const imageData = new ImageData(imageDataArray, width, height);
     
     const blurred = gaussianBlur(imageData, 1);
     const blurredGray = toGrayscale(blurred);
 
     // Enhanced Sobel edge detection
-    const mag = new Float32Array(width * height);
-    
+    const totalPixels = width * height;
+    const mag = new Float32Array(totalPixels);
+
     for (let y = 1; y < height - 1; y++) {
       for (let x = 1; x < width - 1; x++) {
         // 3x3 Sobel kernels
@@ -153,7 +188,12 @@ const enhancedEdgeDetection = (grayData, width, height, minArea) => {
     const mean = sum / mag.length;
     const thresh = Math.max(30, mean * 1.2);
 
-    // Find edge projections
+    // Find edge projections with validation
+    if (width <= 0 || height <= 0 || width > 10000 || height > 10000) {
+      console.warn('Invalid dimensions for projection arrays:', { width, height });
+      return null;
+    }
+
     const colCounts = new Uint32Array(width);
     const rowCounts = new Uint32Array(height);
     

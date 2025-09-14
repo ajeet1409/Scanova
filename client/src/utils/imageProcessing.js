@@ -106,7 +106,19 @@ export const toGrayscale = (imageData) => {
  * @returns {Uint8ClampedArray} Binary image data
  */
 export const adaptiveThreshold = (grayData, width, height, blockSize = 15, C = 10) => {
-  const binary = new Uint8ClampedArray(width * height);
+  // Validate inputs
+  if (!grayData || width <= 0 || height <= 0 || width * height > 10000000) {
+    console.warn('Invalid parameters for adaptiveThreshold:', { width, height, dataLength: grayData?.length });
+    return new Uint8ClampedArray(0);
+  }
+
+  const totalPixels = width * height;
+  if (grayData.length !== totalPixels) {
+    console.warn('Data length mismatch in adaptiveThreshold:', { expected: totalPixels, actual: grayData.length });
+    return new Uint8ClampedArray(totalPixels);
+  }
+
+  const binary = new Uint8ClampedArray(totalPixels);
   const half = Math.floor(blockSize / 2);
 
   for (let y = 0; y < height; y++) {
@@ -144,8 +156,15 @@ export const adaptiveThreshold = (grayData, width, height, blockSize = 15, C = 1
  * @returns {Object} Edge magnitude and direction data
  */
 export const sobelEdgeDetection = (grayData, width, height) => {
-  const magnitude = new Float32Array(width * height);
-  const direction = new Float32Array(width * height);
+  // Validate inputs
+  if (!grayData || width <= 0 || height <= 0 || width * height > 10000000) {
+    console.warn('Invalid parameters for sobelEdgeDetection:', { width, height, dataLength: grayData?.length });
+    return { magnitude: new Float32Array(0), direction: new Float32Array(0) };
+  }
+
+  const totalPixels = width * height;
+  const magnitude = new Float32Array(totalPixels);
+  const direction = new Float32Array(totalPixels);
 
   // Sobel kernels
   const sobelX = [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]];
@@ -320,8 +339,15 @@ export const cannyEdgeDetection = (grayData, width, height, lowThreshold = 50, h
  * @returns {Array} Array of contours, each contour is an array of points
  */
 export const findContours = (binaryData, width, height) => {
+  // Validate inputs
+  if (!binaryData || width <= 0 || height <= 0 || width * height > 10000000) {
+    console.warn('Invalid parameters for findContours:', { width, height, dataLength: binaryData?.length });
+    return [];
+  }
+
   const contours = [];
-  const visited = new Array(width * height).fill(false);
+  const totalPixels = width * height;
+  const visited = new Array(totalPixels).fill(false);
 
   // 8-connectivity directions
   const directions = [
@@ -331,17 +357,26 @@ export const findContours = (binaryData, width, height) => {
   ];
 
   const isValidPoint = (x, y) => x >= 0 && x < width && y >= 0 && y < height;
-  const getPixel = (x, y) => isValidPoint(x, y) ? binaryData[y * width + x] : 0;
+  const getPixel = (x, y) => {
+    if (!isValidPoint(x, y)) return 0;
+    const index = y * width + x;
+    return index < binaryData.length ? binaryData[index] : 0;
+  };
 
-  // Border following algorithm
+  // Border following algorithm with safety limits
   const traceContour = (startX, startY) => {
     const contour = [];
     let x = startX, y = startY;
     let dir = 0; // Start direction
+    let iterations = 0;
+    const maxIterations = Math.min(10000, width * height); // Safety limit
 
     do {
       contour.push({ x, y });
-      visited[y * width + x] = true;
+      const index = y * width + x;
+      if (index >= 0 && index < visited.length) {
+        visited[index] = true;
+      }
 
       // Find next boundary point
       let found = false;
@@ -362,7 +397,13 @@ export const findContours = (binaryData, width, height) => {
 
       if (!found) break;
 
-    } while (x !== startX || y !== startY);
+      iterations++;
+      if (iterations > maxIterations) {
+        console.warn('Contour tracing exceeded maximum iterations');
+        break;
+      }
+
+    } while ((x !== startX || y !== startY) && iterations < maxIterations);
 
     return contour;
   };

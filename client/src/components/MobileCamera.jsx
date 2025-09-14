@@ -154,12 +154,24 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
     return c;
   };
 
-  // Simple Sobel-based edge detector -> compute bounding box of strong-edge region
+  // Simple and robust edge-based document detection (fallback method)
   const findDocumentByEdges = (canvas) => {
     try {
       const w = canvas.width;
       const h = canvas.height;
+
+      // Validate canvas dimensions
+      if (w <= 0 || h <= 0 || w > 4000 || h > 4000) {
+        console.warn('Invalid canvas dimensions for edge detection:', { w, h });
+        return null;
+      }
+
       const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        console.warn('Could not get canvas context');
+        return null;
+      }
+
       const img = ctx.getImageData(0, 0, w, h);
       const data = img.data;
 
@@ -300,34 +312,41 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
       // Method 2: Enhanced document detection (if COCO-SSD didn't find anything good)
       if (!detectedDoc || detectedDoc.confidence < 0.6) {
         const frame = captureFrameCanvas();
-        if (frame) {
-          const enhancedDoc = detectDocument(frame, {
-            minArea: (videoW * videoH) * 0.05, // At least 5% of frame
-            cannyLow: 50,
-            cannyHigh: 150,
-            useAdaptiveThreshold: true,
-            combineResults: true
-          });
+        if (frame && frame.width > 0 && frame.height > 0) {
+          try {
+            const enhancedDoc = detectDocument(frame, {
+              minArea: Math.max(1000, (videoW * videoH) * 0.05), // At least 5% of frame
+              cannyLow: 50,
+              cannyHigh: 150,
+              useAdaptiveThreshold: true,
+              combineResults: true
+            });
 
-          if (enhancedDoc && enhancedDoc.score > 0.3) {
-            const bbox = enhancedDoc.boundingBox;
-            const newDoc = {
-              x: bbox.x,
-              y: bbox.y,
-              w: bbox.width,
-              h: bbox.height,
-              confidence: enhancedDoc.score,
-              class: 'document'
-            };
+            if (enhancedDoc && enhancedDoc.score > 0.3) {
+              const bbox = enhancedDoc.boundingBox;
+              if (bbox && bbox.width > 0 && bbox.height > 0) {
+                const newDoc = {
+                  x: Math.max(0, bbox.x),
+                  y: Math.max(0, bbox.y),
+                  w: Math.min(videoW, bbox.width),
+                  h: Math.min(videoH, bbox.height),
+                  confidence: enhancedDoc.score,
+                  class: 'document'
+                };
 
-            // Use enhanced detection if it's better than COCO-SSD result
-            if (!detectedDoc || enhancedDoc.score > detectedDoc.confidence * 0.8) {
-              detectedDoc = newDoc;
-              method = enhancedDoc.combinedFrom ?
-                `multi-${enhancedDoc.combinedFrom.map(r => r.method).join('+')}` :
-                'enhanced-edge';
+                // Use enhanced detection if it's better than COCO-SSD result
+                if (!detectedDoc || enhancedDoc.score > detectedDoc.confidence * 0.8) {
+                  detectedDoc = newDoc;
+                  method = enhancedDoc.combinedFrom ?
+                    `multi-${enhancedDoc.combinedFrom.map(r => r.method).join('+')}` :
+                    'enhanced-edge';
+                }
+              }
             }
+          } catch (enhancedError) {
+            console.warn('Enhanced document detection failed:', enhancedError);
           }
+        }
         }
       }
 
@@ -349,6 +368,23 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
 
     } catch (error) {
       console.error('Detection loop error:', error);
+
+      // Fallback to simple edge detection if enhanced methods fail
+      try {
+        const frame = captureFrameCanvas();
+        if (frame) {
+          const fallbackDoc = findDocumentByEdges(frame);
+          if (fallbackDoc) {
+            setDocBBox(fallbackDoc);
+            setDetectionMethod('fallback-edge');
+            drawOverlay(fallbackDoc, 0.5, 'Fallback');
+          }
+        }
+      } catch (fallbackError) {
+        console.error('Fallback detection also failed:', fallbackError);
+        setDocBBox(null);
+        setDetectionMethod('failed');
+      }
     }
   };
 
