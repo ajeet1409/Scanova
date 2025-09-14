@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import Webcam from "react-webcam";
 import * as tf from "@tensorflow/tfjs";
 import * as cocossd from "@tensorflow-models/coco-ssd";
-import Tesseract from "tesseract.js";
+import { detectDocument } from "../utils/documentDetection.js";
+import { enhancedOCR, validateOCRResult } from "../utils/enhancedOCR.js";
+import { loadCocoSsdModel, optimizeForMobile } from "../utils/tensorflowSetup.js";
 
 const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
   const webcamRef = useRef(null);
@@ -17,50 +19,126 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
   const [selectedDeviceId, setSelectedDeviceId] = useState(null);
   const [ocrText, setOcrText] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
+  const [ocrConfidence, setOcrConfidence] = useState(0);
+  const [detectionMethod, setDetectionMethod] = useState("");
+  const [processingStats, setProcessingStats] = useState(null);
   const lastExtractHashRef = useRef(null);
   const extractionTimerRef = useRef(null);
 
-  // initialize coco-ssd model and TF backend
+  // Initialize enhanced COCO-SSD model with optimizations
   const runCoco = async () => {
     try {
       setIsLoading(true);
-      await tf.setBackend("webgl");
-      await tf.ready();
-      const model = await cocossd.load();
-      setNet(model);
+
+      // Optimize TensorFlow for mobile
+      await optimizeForMobile();
+
+      // Load enhanced COCO-SSD model
+      const model = await loadCocoSsdModel();
+      if (model) {
+        setNet(model);
+        console.log('✅ Enhanced COCO-SSD model loaded successfully');
+      } else {
+        console.warn('⚠️ Failed to load COCO-SSD model, falling back to edge detection only');
+      }
+
       setIsLoading(false);
     } catch (err) {
-      console.error('Failed to load model', err);
+      console.error('❌ Failed to initialize model:', err);
       setIsLoading(false);
     }
   };
 
-  // Utility: draw overlay box
+  // Enhanced overlay drawing with better visual feedback
   const drawOverlay = (bbox, score, label) => {
     const canvas = canvasRef.current;
     const video = webcamRef.current?.video;
     if (!canvas || !video) return;
-    // Set canvas to video intrinsic size (so drawing coordinates match video pixels)
+
     const ctx = canvas.getContext('2d');
     const vidW = video.videoWidth || video.clientWidth;
     const vidH = video.videoHeight || video.clientHeight;
     canvas.width = vidW;
     canvas.height = vidH;
-    // ensure canvas CSS covers the container
     canvas.style.width = '100%';
     canvas.style.height = '100%';
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     if (bbox) {
-  ctx.strokeStyle = '#00ff00';
-  ctx.lineWidth = Math.max(2, Math.round(4 * (canvas.width / 640)));
-  ctx.strokeRect(bbox.x, bbox.y, bbox.w, bbox.h);
+      // Determine color based on confidence/score
+      let color = '#00ff00'; // Default green
+      if (typeof score === 'number') {
+        if (score < 0.3) color = '#ff6b6b'; // Red for low confidence
+        else if (score < 0.6) color = '#ffd93d'; // Yellow for medium confidence
+        else color = '#6bcf7f'; // Green for high confidence
+      }
 
-      ctx.fillStyle = 'rgba(0,0,0,0.6)';
-      ctx.fillRect(bbox.x, Math.max(0, bbox.y - 24), Math.min(200, bbox.w), 22);
-      ctx.fillStyle = '#fff';
-      ctx.font = '16px sans-serif';
-      ctx.fillText(`${label || 'Document'} ${Math.round((score||0)*100)}%`, bbox.x + 6, Math.max(16, bbox.y - 6));
+      // Draw main bounding box
+      ctx.strokeStyle = color;
+      ctx.lineWidth = Math.max(3, Math.round(4 * (canvas.width / 640)));
+      ctx.strokeRect(bbox.x, bbox.y, bbox.w, bbox.h);
+
+      // Draw corner indicators for better visibility
+      const cornerSize = Math.max(15, Math.round(20 * (canvas.width / 640)));
+      ctx.lineWidth = Math.max(4, Math.round(5 * (canvas.width / 640)));
+
+      // Top-left corner
+      ctx.beginPath();
+      ctx.moveTo(bbox.x, bbox.y + cornerSize);
+      ctx.lineTo(bbox.x, bbox.y);
+      ctx.lineTo(bbox.x + cornerSize, bbox.y);
+      ctx.stroke();
+
+      // Top-right corner
+      ctx.beginPath();
+      ctx.moveTo(bbox.x + bbox.w - cornerSize, bbox.y);
+      ctx.lineTo(bbox.x + bbox.w, bbox.y);
+      ctx.lineTo(bbox.x + bbox.w, bbox.y + cornerSize);
+      ctx.stroke();
+
+      // Bottom-left corner
+      ctx.beginPath();
+      ctx.moveTo(bbox.x, bbox.y + bbox.h - cornerSize);
+      ctx.lineTo(bbox.x, bbox.y + bbox.h);
+      ctx.lineTo(bbox.x + cornerSize, bbox.y + bbox.h);
+      ctx.stroke();
+
+      // Bottom-right corner
+      ctx.beginPath();
+      ctx.moveTo(bbox.x + bbox.w - cornerSize, bbox.y + bbox.h);
+      ctx.lineTo(bbox.x + bbox.w, bbox.y + bbox.h);
+      ctx.lineTo(bbox.x + bbox.w, bbox.y + bbox.h - cornerSize);
+      ctx.stroke();
+
+      // Draw label with enhanced background
+      const confidence = typeof score === 'number' ? Math.round(score * 100) : Math.round(score || 0);
+      const text = `${label || 'Document'} ${confidence}%`;
+
+      ctx.font = 'bold 16px sans-serif';
+      const textMetrics = ctx.measureText(text);
+      const textWidth = textMetrics.width;
+      const labelHeight = 28;
+
+      // Enhanced label background with gradient
+      const gradient = ctx.createLinearGradient(bbox.x, bbox.y - labelHeight, bbox.x, bbox.y);
+      gradient.addColorStop(0, 'rgba(0,0,0,0.8)');
+      gradient.addColorStop(1, 'rgba(0,0,0,0.6)');
+
+      ctx.fillStyle = gradient;
+      ctx.fillRect(bbox.x, Math.max(0, bbox.y - labelHeight), Math.min(textWidth + 16, bbox.w), labelHeight);
+
+      // Label text
+      ctx.fillStyle = color;
+      ctx.fillText(text, bbox.x + 8, Math.max(18, bbox.y - 8));
+
+      // Add scanning animation effect when processing
+      if (isProcessing) {
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([8, 4]);
+        ctx.strokeRect(bbox.x + 4, bbox.y + 4, bbox.w - 8, bbox.h - 8);
+        ctx.setLineDash([]); // Reset dash
+      }
     }
   };
 
@@ -176,7 +254,7 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
     }
   };
 
-  // Main detection loop: prefer model detections, fallback to edge detection
+  // Enhanced detection loop using multiple approaches
   const detectLoop = async () => {
     if (!webcamRef.current || !webcamRef.current.video) return;
     const video = webcamRef.current.video;
@@ -184,46 +262,93 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
 
     const videoW = video.videoWidth;
     const videoH = video.videoHeight;
+    let detectedDoc = null;
+    let method = 'none';
 
-    // use model if loaded
-    if (net) {
-      try {
-        const preds = await net.detect(video);
-        // find document-like classes
-        const paperPreds = preds.filter(p => {
-          const cls = (p.class || '').toLowerCase();
-          return ['book','paper','document','notebook','magazine'].some(k => cls.includes(k));
-        });
+    try {
+      // Method 1: COCO-SSD model detection (if available)
+      if (net) {
+        try {
+          const preds = await net.detect(video);
+          const paperPreds = preds.filter(p => {
+            const cls = (p.class || '').toLowerCase();
+            return ['book', 'paper', 'document', 'notebook', 'magazine', 'laptop', 'cell phone'].some(k => cls.includes(k));
+          });
 
-        if (paperPreds.length > 0) {
-          // select largest by area
-          const best = paperPreds.reduce((a,b) => (a.bbox[2]*a.bbox[3] > b.bbox[2]*b.bbox[3]) ? a : b);
-          const [x,y,w,h] = best.bbox;
-          const bbox = { x: Math.max(0, x), y: Math.max(0, y), w: Math.min(videoW - x, w), h: Math.min(videoH - y, h) };
-          setDocBBox(bbox);
-          drawOverlay(bbox, best.score, best.class);
-          return;
+          if (paperPreds.length > 0) {
+            const best = paperPreds.reduce((a, b) => (a.bbox[2] * a.bbox[3] > b.bbox[2] * b.bbox[3]) ? a : b);
+            const [x, y, w, h] = best.bbox;
+
+            // Validate detection bounds
+            if (w > videoW * 0.1 && h > videoH * 0.1) {
+              detectedDoc = {
+                x: Math.max(0, x),
+                y: Math.max(0, y),
+                w: Math.min(videoW - x, w),
+                h: Math.min(videoH - y, h),
+                confidence: best.score,
+                class: best.class
+              };
+              method = `coco-ssd-${best.class}`;
+            }
+          }
+        } catch (err) {
+          console.warn('COCO-SSD detection failed:', err);
         }
-      } catch (err) {
-        console.error('Model detection failed', err);
       }
-    }
 
-    // fallback edge-based detection
-    const frame = captureFrameCanvas();
-    if (!frame) return;
-    const edgeBox = findDocumentByEdges(frame);
-    if (edgeBox) {
-      setDocBBox(edgeBox);
-      drawOverlay(edgeBox, 0, 'EdgeDetect');
-    } else {
-      setDocBBox(null);
-      // clear overlay
-      const canvas = canvasRef.current;
-      if (canvas) {
-        const ctx = canvas.getContext('2d');
-        ctx.clearRect(0,0,canvas.width,canvas.height);
+      // Method 2: Enhanced document detection (if COCO-SSD didn't find anything good)
+      if (!detectedDoc || detectedDoc.confidence < 0.6) {
+        const frame = captureFrameCanvas();
+        if (frame) {
+          const enhancedDoc = detectDocument(frame, {
+            minArea: (videoW * videoH) * 0.05, // At least 5% of frame
+            cannyLow: 50,
+            cannyHigh: 150,
+            useAdaptiveThreshold: true,
+            combineResults: true
+          });
+
+          if (enhancedDoc && enhancedDoc.score > 0.3) {
+            const bbox = enhancedDoc.boundingBox;
+            const newDoc = {
+              x: bbox.x,
+              y: bbox.y,
+              w: bbox.width,
+              h: bbox.height,
+              confidence: enhancedDoc.score,
+              class: 'document'
+            };
+
+            // Use enhanced detection if it's better than COCO-SSD result
+            if (!detectedDoc || enhancedDoc.score > detectedDoc.confidence * 0.8) {
+              detectedDoc = newDoc;
+              method = enhancedDoc.combinedFrom ?
+                `multi-${enhancedDoc.combinedFrom.map(r => r.method).join('+')}` :
+                'enhanced-edge';
+            }
+          }
+        }
       }
+
+      // Update state and UI
+      if (detectedDoc) {
+        setDocBBox(detectedDoc);
+        setDetectionMethod(method);
+        drawOverlay(detectedDoc, detectedDoc.confidence, detectedDoc.class);
+      } else {
+        setDocBBox(null);
+        setDetectionMethod('none');
+        // Clear overlay
+        const canvas = canvasRef.current;
+        if (canvas) {
+          const ctx = canvas.getContext('2d');
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
+      }
+
+    } catch (error) {
+      console.error('Detection loop error:', error);
     }
   };
 
@@ -328,68 +453,101 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
 
     // Wait briefly to ensure stable detection (debounce)
     extractionTimerRef.current = setTimeout(async () => {
-      // double-check bbox still exists
+      // Double-check bbox still exists
       if (!docBBox) return;
       const currentHash = `${Math.round(docBBox.x)}:${Math.round(docBBox.y)}:${Math.round(docBBox.w)}:${Math.round(docBBox.h)}`;
       if (lastExtractHashRef.current === currentHash) return;
+
       try {
         setIsProcessing(true);
-        // capture and crop
+        setOcrConfidence(0);
+        setProcessingStats(null);
+
+        // Capture and crop the document region
         const frame = captureFrameCanvas();
         if (!frame) return;
+
         const crop = document.createElement('canvas');
         crop.width = Math.max(1, Math.round(docBBox.w));
         crop.height = Math.max(1, Math.round(docBBox.h));
         const cctx = crop.getContext('2d');
         cctx.drawImage(frame, docBBox.x, docBBox.y, docBBox.w, docBBox.h, 0, 0, crop.width, crop.height);
 
-        // simple preprocessing: resize if big, convert to grayscale & stretch
+        // Resize if too large (for performance)
         const maxDim = 1600;
-        let proc = crop;
-        if (proc.width > maxDim || proc.height > maxDim) {
-          const scale = Math.min(maxDim / proc.width, maxDim / proc.height);
+        let processedCanvas = crop;
+        if (crop.width > maxDim || crop.height > maxDim) {
+          const scale = Math.min(maxDim / crop.width, maxDim / crop.height);
           const resized = document.createElement('canvas');
-          resized.width = Math.round(proc.width * scale);
-          resized.height = Math.round(proc.height * scale);
+          resized.width = Math.round(crop.width * scale);
+          resized.height = Math.round(crop.height * scale);
           const rctx = resized.getContext('2d');
-          rctx.drawImage(proc, 0, 0, resized.width, resized.height);
-          proc = resized;
+          rctx.drawImage(crop, 0, 0, resized.width, resized.height);
+          processedCanvas = resized;
         }
 
-        const pctx = proc.getContext('2d');
-        const imgd = pctx.getImageData(0,0,proc.width,proc.height);
-        const d = imgd.data;
-        let min=255, max=0;
-        for (let i=0;i<d.length;i+=4){
-          const g = (d[i]*0.299 + d[i+1]*0.587 + d[i+2]*0.114)|0;
-          if (g<min) min=g; if (g>max) max=g;
-        }
-        const range = Math.max(1, max-min);
-        for (let i=0;i<d.length;i+=4){
-          const g = (d[i]*0.299 + d[i+1]*0.587 + d[i+2]*0.114)|0;
-          const stretched = Math.min(255, Math.max(0, Math.round((g - min) * 255 / range)));
-          d[i]=d[i+1]=d[i+2]=stretched;
-        }
-        pctx.putImageData(imgd,0,0);
+        // Use enhanced OCR with multiple preprocessing approaches
+        const ocrResult = await enhancedOCR(processedCanvas, {
+          languages: 'eng',
+          useMultiplePreprocessing: true,
+          confidenceThreshold: 30, // Lower threshold for real-time processing
+          enableSpellCheck: true,
+          maxRetries: 1 // Limit retries for real-time performance
+        });
 
-        const blob = await new Promise(res => proc.toBlob(res, 'image/jpeg', 0.9));
-        const { data: { text } } = await Tesseract.recognize(blob, 'eng', { logger: m => {} });
-        const clean = (text || '').trim();
-        setOcrText(clean);
-        lastExtractHashRef.current = currentHash;
-        // notify parent
-        try {
-          onTextExtracted?.(clean);
-        } catch (e) {}
-        try {
-          onSolutionGenerated?.(clean);
-        } catch (e) {}
+        if (ocrResult.success && ocrResult.text.length > 0) {
+          // Validate the OCR result
+          const validation = validateOCRResult(ocrResult);
+
+          setOcrText(ocrResult.text);
+          setOcrConfidence(ocrResult.confidence);
+          setDetectionMethod(prev => `${prev}+${ocrResult.method}`);
+          setProcessingStats({
+            confidence: ocrResult.confidence,
+            method: ocrResult.method,
+            processingTime: ocrResult.metadata.processingTime,
+            wordCount: ocrResult.metadata.totalAttempts,
+            corrected: ocrResult.metadata.corrected,
+            validation: validation
+          });
+
+          lastExtractHashRef.current = currentHash;
+
+          // Notify parent components
+          try {
+            onTextExtracted?.(ocrResult.text);
+          } catch (e) {
+            console.warn('Error notifying text extracted:', e);
+          }
+
+          try {
+            onSolutionGenerated?.(ocrResult.text);
+          } catch (e) {
+            console.warn('Error notifying solution generated:', e);
+          }
+
+          console.log('✅ OCR completed:', {
+            text: ocrResult.text.substring(0, 100) + '...',
+            confidence: ocrResult.confidence,
+            method: ocrResult.method,
+            validation: validation.isValid
+          });
+
+        } else {
+          console.warn('⚠️ OCR failed or returned empty result');
+          setOcrText('');
+          setOcrConfidence(0);
+        }
+
       } catch (err) {
-        console.error('Auto OCR failed', err);
+        console.error('❌ Enhanced OCR failed:', err);
+        setOcrText('');
+        setOcrConfidence(0);
+        setProcessingStats(null);
       } finally {
         setIsProcessing(false);
       }
-    }, 800);
+    }, 1000); // Slightly longer debounce for better stability
 
     return () => {
       if (extractionTimerRef.current) {
@@ -454,17 +612,22 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
               </span>
             </button>
 
-            {/* Status Indicator */}
+            {/* Enhanced Status Indicator */}
             <div className="camera-overlay bg-black/50 text-white px-4 py-2 rounded-full text-sm border border-white/20">
               {isProcessing ? (
                 <span className="flex items-center gap-2">
                   <div className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse"></div>
-                  🔍 Scanning...
+                  🔍 Processing OCR...
                 </span>
               ) : docBBox ? (
                 <span className="flex items-center gap-2">
                   <div className="w-2 h-2 bg-green-400 rounded-full"></div>
-                  ✅ Document Found
+                  ✅ Doc Found
+                  {ocrConfidence > 0 && (
+                    <span className="text-xs bg-green-500/20 px-2 py-1 rounded">
+                      {ocrConfidence}% confident
+                    </span>
+                  )}
                 </span>
               ) : (
                 <span className="flex items-center gap-2">
@@ -497,26 +660,50 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
           )}
         </div>
 
-        {/* Extracted Text Panel */}
+        {/* Enhanced Extracted Text Panel */}
         <div className="bg-gradient-to-r from-gray-800 via-gray-900 to-gray-800 p-4 border-t border-gray-700/50">
           <div className="flex items-center justify-between mb-3">
             <h4 className="text-white font-medium flex items-center gap-2">
               📝 Extracted Text
               {isProcessing && <div className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse"></div>}
             </h4>
-            <div className="text-xs text-gray-400 bg-gray-700/50 px-3 py-1 rounded-full border border-gray-600">
-              {isProcessing ? (
-                <span className="flex items-center gap-1">
-                  <div className="w-1 h-1 bg-yellow-400 rounded-full animate-pulse"></div>
-                  Processing...
-                </span>
-              ) : ocrText ? (
-                <span className="text-green-400">{ocrText.length} characters</span>
-              ) : (
-                <span className="text-gray-500">Waiting</span>
+            <div className="flex items-center gap-2">
+              {/* Confidence Badge */}
+              {ocrConfidence > 0 && (
+                <div className={`text-xs px-2 py-1 rounded-full border ${
+                  ocrConfidence >= 80 ? 'bg-green-500/20 text-green-400 border-green-500/30' :
+                  ocrConfidence >= 60 ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30' :
+                  'bg-red-500/20 text-red-400 border-red-500/30'
+                }`}>
+                  {ocrConfidence}% confident
+                </div>
               )}
+
+              {/* Character Count */}
+              <div className="text-xs text-gray-400 bg-gray-700/50 px-3 py-1 rounded-full border border-gray-600">
+                {isProcessing ? (
+                  <span className="flex items-center gap-1">
+                    <div className="w-1 h-1 bg-yellow-400 rounded-full animate-pulse"></div>
+                    Processing...
+                  </span>
+                ) : ocrText ? (
+                  <span className="text-green-400">{ocrText.length} chars</span>
+                ) : (
+                  <span className="text-gray-500">Waiting</span>
+                )}
+              </div>
             </div>
           </div>
+
+          {/* Processing Stats */}
+          {processingStats && (
+            <div className="mb-3 text-xs text-gray-400 flex items-center gap-4">
+              <span>Method: {processingStats.method}</span>
+              <span>Time: {processingStats.processingTime}ms</span>
+              {processingStats.corrected && <span className="text-blue-400">✨ Spell-checked</span>}
+            </div>
+          )}
+
           <div className="bg-gray-900/70 rounded-xl p-4 min-h-[100px] max-h-40 overflow-y-auto border border-gray-700/50">
             <div className="text-sm text-gray-200 break-words whitespace-pre-wrap leading-relaxed">
               {ocrText ? (
@@ -529,6 +716,13 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
               )}
             </div>
           </div>
+
+          {/* Detection Method Info */}
+          {detectionMethod && detectionMethod !== 'none' && (
+            <div className="mt-2 text-xs text-gray-500 flex items-center gap-2">
+              <span>🔍 Detection: {detectionMethod}</span>
+            </div>
+          )}
         </div>
       </div>
     </div>
