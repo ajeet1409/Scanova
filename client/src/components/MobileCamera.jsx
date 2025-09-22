@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import Webcam from "react-webcam";
 import { detectDocument } from "../utils/documentDetection.js";
 import { enhancedOCR, validateOCRResult } from "../utils/enhancedOCR.js";
-import { loadCocoSsdModel, optimizeForMobile } from "../utils/tensorflowSetup.js";
 
 const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
   const webcamRef = useRef(null);
@@ -11,8 +10,7 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
 
   // default to rear camera
   const [cameraMode, setCameraMode] = useState("environment");
-  const [isLoading, setIsLoading] = useState(false);
-  const [net, setNet] = useState(null);
+  const [isLoading] = useState(false);
   const [docBBox, setDocBBox] = useState(null); // {x,y,w,h}
   const [selectedDeviceId, setSelectedDeviceId] = useState(null);
   const [ocrText, setOcrText] = useState("");
@@ -23,29 +21,7 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
   const lastExtractHashRef = useRef(null);
   const extractionTimerRef = useRef(null);
 
-  // Initialize enhanced COCO-SSD model with optimizations
-  const runCoco = async () => {
-    try {
-      setIsLoading(true);
-
-      // Optimize TensorFlow for mobile
-      await optimizeForMobile();
-
-      // Load enhanced COCO-SSD model
-      const model = await loadCocoSsdModel();
-      if (model) {
-        setNet(model);
-        console.log('✅ Enhanced COCO-SSD model loaded successfully');
-      } else {
-        console.warn('⚠️ Failed to load COCO-SSD model, falling back to edge detection only');
-      }
-
-      setIsLoading(false);
-    } catch (err) {
-      console.error('❌ Failed to initialize model:', err);
-      setIsLoading(false);
-    }
-  };
+  // TensorFlow COCO-SSD removed; using Python backend for detection
 
   // Enhanced overlay drawing with better visual feedback
   const drawOverlay = useCallback((bbox, score, label) => {
@@ -176,6 +152,7 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
       // convert to grayscale
       const gray = new Uint8ClampedArray(w * h);
       for (let i = 0, j = 0; i < data.length; i += 4, j++) {
+
         gray[j] = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) | 0;
       }
 
@@ -263,6 +240,56 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
       return null;
     }
   }, []);
+  // Call Python FastAPI object detection (YOLO) and map to bbox
+  const pyDetectObjects = useCallback(async (canvas) => {
+    const originalW = canvas.width;
+    const originalH = canvas.height;
+
+    // Downscale for bandwidth/perf
+    const maxW = 640;
+    const scale = Math.min(1, maxW / originalW);
+    let sendCanvas = canvas;
+    if (scale < 1) {
+      const dw = Math.max(1, Math.round(originalW * scale));
+      const dh = Math.max(1, Math.round(originalH * scale));
+      const off = document.createElement('canvas');
+      off.width = dw; off.height = dh;
+      const octx = off.getContext('2d');
+      octx.drawImage(canvas, 0, 0, dw, dh);
+      sendCanvas = off;
+    }
+
+    const blob = await new Promise(resolve => sendCanvas.toBlob(resolve, 'image/jpeg', 0.8));
+    const form = new FormData();
+    form.append('image', blob, 'frame.jpg');
+
+    const PY_URL = 'http://127.0.0.1:8001/detect'; // configure as needed
+    const res = await fetch(PY_URL, { method: 'POST', body: form });
+    if (!res.ok) throw new Error(`Python service error: ${res.status}`);
+    const data = await res.json();
+    if (!data.success || !Array.isArray(data.detections) || data.detections.length === 0) return null;
+
+    // Prefer document-like classes; fall back to largest box
+    const preferred = ['book','paper','document','notebook','magazine','laptop','cell phone','tv'];
+    const dets = data.detections;
+    const candidates = dets.filter(d => preferred.includes(String(d.label).toLowerCase()));
+    const pool = candidates.length > 0 ? candidates : dets;
+
+    // Pick largest area
+    const best = pool.reduce((a, b) => (a.width * a.height > b.width * b.height) ? a : b);
+
+    const inv = scale === 0 ? 1 : (1 / scale);
+    const x = Math.max(0, Math.round(best.x * inv));
+    const y = Math.max(0, Math.round(best.y * inv));
+    const w = Math.round(best.width * inv);
+    const h = Math.round(best.height * inv);
+
+    // Basic sanity check
+    if (w < originalW * 0.08 || h < originalH * 0.08) return null;
+
+    return { x, y, w, h, confidence: best.score ?? 0.5, class: best.label || 'object' };
+  }, []);
+
 
   // Enhanced detection loop using multiple approaches
   const detectLoop = useCallback(async () => {
@@ -286,6 +313,7 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
               combineResults: false,
               minArea: Math.max(600, (videoW * videoH) * 0.03), // smaller threshold for quick pass
               cannyLow: 60,
+
               cannyHigh: 140
             });
             if (quickDoc && quickDoc.score > 0.35) {
@@ -314,34 +342,19 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
         }
       }
 
-      // Method 1: COCO-SSD model detection (if available)
-      if (net) {
-        try {
-          const preds = await net.detect(video);
-          const paperPreds = preds.filter(p => {
-            const cls = (p.class || '').toLowerCase();
-            return ['book', 'paper', 'document', 'notebook', 'magazine', 'laptop', 'cell phone'].some(k => cls.includes(k));
-          });
-
-          if (paperPreds.length > 0) {
-            const best = paperPreds.reduce((a, b) => (a.bbox[2] * a.bbox[3] > b.bbox[2] * b.bbox[3]) ? a : b);
-            const [x, y, w, h] = best.bbox;
-
-            // Validate detection bounds
-            if (w > videoW * 0.1 && h > videoH * 0.1) {
-              detectedDoc = {
-                x: Math.max(0, x),
-                y: Math.max(0, y),
-                w: Math.min(videoW - x, w),
-                h: Math.min(videoH - y, h),
-                confidence: best.score,
-                class: best.class
-              };
-              method = `coco-ssd-${best.class}`;
+      // Method 1: Python backend detection (YOLO via FastAPI)
+      {
+        const frame = captureFrameCanvas();
+        if (frame && frame.width > 0 && frame.height > 0) {
+          try {
+            const pyDoc = await pyDetectObjects(frame);
+            if (pyDoc) {
+              detectedDoc = pyDoc;
+              method = `python-${pyDoc.class || 'object'}`;
             }
+          } catch (err) {
+            console.warn('Python detection failed:', err);
           }
-        } catch (err) {
-          console.warn('COCO-SSD detection failed:', err);
         }
       }
 
@@ -421,7 +434,7 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
         setDetectionMethod('failed');
       }
     }
-  }, [net, drawOverlay, captureFrameCanvas, findDocumentByEdges]);
+  }, [drawOverlay, captureFrameCanvas, findDocumentByEdges, pyDetectObjects]);
 
   // Run continuous detection using requestAnimationFrame loop
   useEffect(() => {
@@ -447,9 +460,7 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
   //   }, 100);
   // };
 
-  useEffect(() => {
-    runCoco();
-  }, []);
+  // Removed TensorFlow model initialization
 
   // Default to rear camera on mobile devices
   useEffect(() => {

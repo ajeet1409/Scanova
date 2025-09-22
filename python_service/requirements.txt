@@ -1,0 +1,5 @@
+fastapi==0.115.0
+uvicorn[standard]==0.34.0
+ultralytics==8.3.39
+pillow==10.4.0
+
