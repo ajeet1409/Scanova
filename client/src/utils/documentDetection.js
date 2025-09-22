@@ -12,6 +12,10 @@ import {
   gaussianBlur
 } from './imageProcessing.js';
 
+
+// Reusable offscreen canvas to avoid frequent allocations in fast path
+let __docDetectScratchCanvas = null;
+
 /**
  * Enhanced document detection using multiple approaches
  * @param {HTMLCanvasElement} canvas - Input canvas with image
@@ -69,9 +73,9 @@ export const detectDocument = (canvas, options = {}) => {
         if (scale < 1) {
           const dw = Math.max(1, Math.round(width * scale));
           const dh = Math.max(1, Math.round(height * scale));
-          const off = document.createElement('canvas');
-          off.width = dw; off.height = dh;
-          const octx = off.getContext('2d');
+          if (!__docDetectScratchCanvas) __docDetectScratchCanvas = document.createElement('canvas');
+          __docDetectScratchCanvas.width = dw; __docDetectScratchCanvas.height = dh;
+          const octx = __docDetectScratchCanvas.getContext('2d');
           octx.drawImage(canvas, 0, 0, dw, dh);
           const smallImage = octx.getImageData(0, 0, dw, dh);
           smallGray = toGrayscale(smallImage);
@@ -214,7 +218,7 @@ const enhancedEdgeDetection = (grayData, width, height, minArea) => {
     }
 
     const imageData = new ImageData(imageDataArray, width, height);
-    
+
     const blurred = gaussianBlur(imageData, 1);
     const blurredGray = toGrayscale(blurred);
 
@@ -224,15 +228,15 @@ const enhancedEdgeDetection = (grayData, width, height, minArea) => {
     for (let y = 1; y < height - 1; y++) {
       for (let x = 1; x < width - 1; x++) {
         // 3x3 Sobel kernels
-        const gx = 
+        const gx =
           -1 * blurredGray[(y-1)*width + (x-1)] + 1 * blurredGray[(y-1)*width + (x+1)] +
           -2 * blurredGray[y*width + (x-1)]     + 2 * blurredGray[y*width + (x+1)] +
           -1 * blurredGray[(y+1)*width + (x-1)] + 1 * blurredGray[(y+1)*width + (x+1)];
-          
-        const gy = 
+
+        const gy =
           -1 * blurredGray[(y-1)*width + (x-1)] - 2 * blurredGray[(y-1)*width + x] - 1 * blurredGray[(y-1)*width + (x+1)] +
            1 * blurredGray[(y+1)*width + (x-1)] + 2 * blurredGray[(y+1)*width + x] + 1 * blurredGray[(y+1)*width + (x+1)];
-        
+
         mag[y * width + x] = Math.sqrt(gx * gx + gy * gy);
       }
     }
@@ -251,7 +255,7 @@ const enhancedEdgeDetection = (grayData, width, height, minArea) => {
 
     const colCounts = new Uint32Array(width);
     const rowCounts = new Uint32Array(height);
-    
+
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < width; x++) {
         if (mag[y * width + x] >= thresh) {
@@ -277,7 +281,7 @@ const enhancedEdgeDetection = (grayData, width, height, minArea) => {
     const edgeDensity = (xBounds.strength + yBounds.strength) / (docWidth + docHeight);
     const aspectRatio = Math.max(docWidth, docHeight) / Math.min(docWidth, docHeight);
     const aspectScore = Math.max(0, 1 - Math.abs(aspectRatio - 1.414) / 2); // Prefer A4-like ratios
-    
+
     const confidence = edgeDensity * aspectScore * Math.sqrt(area / (width * height));
 
     return {
@@ -312,7 +316,7 @@ const enhancedEdgeDetection = (grayData, width, height, minArea) => {
 const findPeakBounds = (projection, minStrength) => {
   const len = projection.length;
   const smoothed = new Float32Array(len);
-  
+
   // Apply smoothing
   for (let i = 0; i < len; i++) {
     let sum = 0, count = 0;
@@ -326,18 +330,18 @@ const findPeakBounds = (projection, minStrength) => {
   // Find the strongest continuous region
   let maxSum = 0;
   let bestStart = 0, bestEnd = 0;
-  
+
   for (let start = 0; start < len; start++) {
     if (smoothed[start] < minStrength) continue;
-    
+
     let sum = 0;
     let end = start;
-    
+
     while (end < len && smoothed[end] >= minStrength) {
       sum += smoothed[end];
       end++;
     }
-    
+
     if (sum > maxSum && (end - start) > len * 0.1) {
       maxSum = sum;
       bestStart = start;
@@ -366,26 +370,26 @@ const gradientBasedDetection = (grayData, width, height, minArea) => {
   try {
     // Calculate gradient magnitude using Scharr operator (more accurate than Sobel)
     const magnitude = new Float32Array(width * height);
-    
+
     for (let y = 1; y < height - 1; y++) {
       for (let x = 1; x < width - 1; x++) {
         // Scharr kernels
-        const gx = 
+        const gx =
           -3 * grayData[(y-1)*width + (x-1)] + 3 * grayData[(y-1)*width + (x+1)] +
           -10 * grayData[y*width + (x-1)]    + 10 * grayData[y*width + (x+1)] +
           -3 * grayData[(y+1)*width + (x-1)] + 3 * grayData[(y+1)*width + (x+1)];
-          
-        const gy = 
+
+        const gy =
           -3 * grayData[(y-1)*width + (x-1)] - 10 * grayData[(y-1)*width + x] - 3 * grayData[(y-1)*width + (x+1)] +
            3 * grayData[(y+1)*width + (x-1)] + 10 * grayData[(y+1)*width + x] + 3 * grayData[(y+1)*width + (x+1)];
-        
+
         magnitude[y * width + x] = Math.sqrt(gx * gx + gy * gy);
       }
     }
 
     // Use Otsu's method for automatic thresholding
     const threshold = otsuThreshold(magnitude);
-    
+
     // Create binary edge map
     const edges = new Uint8ClampedArray(width * height);
     for (let i = 0; i < magnitude.length; i++) {
@@ -411,7 +415,7 @@ const otsuThreshold = (data) => {
   // Create histogram
   const histogram = new Array(256).fill(0);
   let min = Infinity, max = -Infinity;
-  
+
   for (let i = 0; i < data.length; i++) {
     const val = Math.min(255, Math.max(0, Math.round(data[i])));
     histogram[val]++;
@@ -462,16 +466,16 @@ const otsuThreshold = (data) => {
 const combineDetectionResults = (results) => {
   // For now, return the result with highest weighted confidence
   // Future enhancement: implement actual result fusion
-  const best = results.reduce((a, b) => 
+  const best = results.reduce((a, b) =>
     (a.confidence * a.weight) > (b.confidence * b.weight) ? a : b
   );
-  
+
   // Add metadata about the combination
   best.boundary.combinedFrom = results.map(r => ({
     method: r.method,
     confidence: r.confidence,
     weight: r.weight
   }));
-  
+
   return best.boundary;
 };

@@ -25,6 +25,12 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
   const textScanTimerRef = useRef(null);
 
 
+  // Throttling and backoff refs for stability
+  const lastDetectTimeRef = useRef(0);
+  const pyInFlightRef = useRef(false);
+  const pyLastCallRef = useRef(0);
+  const pyBackoffUntilRef = useRef(0);
+
   // Enhanced overlay drawing with better visual feedback
   const drawOverlay = useCallback((bbox, score, label) => {
     const canvas = canvasRef.current;
@@ -347,6 +353,12 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
 
     const videoW = video.videoWidth;
     const videoH = video.videoHeight;
+
+	    // Throttle overall detection loop to reduce CPU/memory pressure
+	    const nowTs = Date.now();
+	    if (nowTs - lastDetectTimeRef.current < 120) return; // run heavy steps ~8 fps
+	    lastDetectTimeRef.current = nowTs;
+
     let detectedDoc = null;
     let method = 'none';
 
@@ -393,15 +405,24 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
       // Method 1: Python backend detection (YOLO via FastAPI)
       {
         const frame = captureFrameCanvas();
-        if (frame && frame.width > 0 && frame.height > 0) {
+        const now = Date.now();
+        const canCallPy = now > pyBackoffUntilRef.current &&
+                          !pyInFlightRef.current &&
+                          (now - pyLastCallRef.current) > 600;
+        if (canCallPy && frame && frame.width > 0 && frame.height > 0) {
+          pyInFlightRef.current = true;
           try {
             const pyDoc = await pyDetectObjects(frame);
             if (pyDoc) {
               detectedDoc = pyDoc;
               method = `python-${pyDoc.class || 'object'}`;
             }
+            pyLastCallRef.current = Date.now();
           } catch (err) {
             console.warn('Python detection failed:', err);
+            pyBackoffUntilRef.current = Date.now() + 2000; // back off for 2s on error
+          } finally {
+            pyInFlightRef.current = false;
           }
         }
       }
@@ -764,9 +785,9 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
 
 
           {/* Inline Solution/Text Overlay */}
-          <div className="absolute top-16 left-4 right-4 z-20">
+          <div className="absolute top-20 left-4 right-4 z-40 pointer-events-none">
             {ocrText && (
-              <div className="bg-black/60 backdrop-blur-sm text-white p-3 rounded-xl border border-white/20 max-h-[40vh] overflow-y-auto shadow-lg">
+              <div className="bg-black/60 backdrop-blur-sm text-white p-3 rounded-xl border border-white/20 max-h-[40vh] overflow-y-auto shadow-lg pointer-events-auto">
                 <div className="flex items-center justify-between mb-2 text-xs text-white/70">
                   <span>Solution</span>
                   {ocrConfidence > 0 && (
