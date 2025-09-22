@@ -128,11 +128,14 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
   const captureFrameCanvas = useCallback(() => {
     const video = webcamRef.current?.video;
     if (!video) return null;
+    const vw = video.videoWidth | 0;
+    const vh = video.videoHeight | 0;
+    if (vw <= 0 || vh <= 0) return null;
     const c = tmpCanvasRef.current;
-    c.width = video.videoWidth;
-    c.height = video.videoHeight;
+    c.width = vw;
+    c.height = vh;
     const ctx = c.getContext('2d');
-    ctx.drawImage(video, 0, 0, c.width, c.height);
+    ctx.drawImage(video, 0, 0, vw, vh);
     return c;
   }, []);
 

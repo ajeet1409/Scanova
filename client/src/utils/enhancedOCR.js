@@ -20,7 +20,6 @@ export const enhancedOCR = async (input, options = {}) => {
     useMultiplePreprocessing = true,
     confidenceThreshold = 60,
     enableSpellCheck = true,
-    maxRetries = 2,
     fast = false
   } = options;
 
@@ -31,11 +30,19 @@ export const enhancedOCR = async (input, options = {}) => {
     // Convert input to canvas if needed
     let canvas = await inputToCanvas(input);
 
+    // Validate canvas dimensions early to avoid IndexSizeError
+    if (!canvas || !canvas.getContext) {
+      return { success: false, text: '', confidence: 0, method: 'none', alternatives: [], error: 'Invalid canvas' };
+    }
+    if ((canvas.width | 0) <= 0 || (canvas.height | 0) <= 0) {
+      return { success: false, text: '', confidence: 0, method: 'none', alternatives: [], error: 'Empty canvas' };
+    }
+
     // If fast mode, optionally downscale to speed OCR
     if (fast && canvas.width > 700) {
       const scale = 700 / canvas.width;
       const dw = 700;
-      const dh = Math.round(canvas.height * scale);
+      const dh = Math.max(1, Math.round(canvas.height * scale));
       const off = document.createElement('canvas');
       off.width = dw; off.height = dh;
       const octx = off.getContext('2d');
@@ -169,6 +176,9 @@ const inputToCanvas = async (input) => {
  */
 const enhanceForOCR = (canvas) => {
   const { width, height } = canvas;
+  if ((width | 0) <= 0 || (height | 0) <= 0) {
+    const out = document.createElement('canvas'); out.width = 1; out.height = 1; return out;
+  }
   const ctx = canvas.getContext('2d');
   const imageData = ctx.getImageData(0, 0, width, height);
 
@@ -220,6 +230,9 @@ const enhanceForOCR = (canvas) => {
  */
 const adaptivePreprocessing = (canvas) => {
   const { width, height } = canvas;
+  if ((width | 0) <= 0 || (height | 0) <= 0) {
+    const out = document.createElement('canvas'); out.width = 1; out.height = 1; return out;
+  }
   const ctx = canvas.getContext('2d');
   const imageData = ctx.getImageData(0, 0, width, height);
   const grayData = toGrayscale(imageData);
@@ -251,6 +264,9 @@ const adaptivePreprocessing = (canvas) => {
  */
 const highContrastPreprocessing = (canvas) => {
   const { width, height } = canvas;
+  if ((width | 0) <= 0 || (height | 0) <= 0) {
+    const out = document.createElement('canvas'); out.width = 1; out.height = 1; return out;
+  }
   const ctx = canvas.getContext('2d');
   const imageData = ctx.getImageData(0, 0, width, height);
   const { data } = imageData;
@@ -283,6 +299,9 @@ const highContrastPreprocessing = (canvas) => {
  */
 const denoisedPreprocessing = (canvas) => {
   const { width, height } = canvas;
+  if ((width | 0) <= 0 || (height | 0) <= 0) {
+    const out = document.createElement('canvas'); out.width = 1; out.height = 1; return out;
+  }
   const ctx = canvas.getContext('2d');
   const imageData = ctx.getImageData(0, 0, width, height);
 
@@ -365,8 +384,11 @@ const performOCR = async (canvas, options = {}) => {
   const startTime = Date.now();
 
   try {
-    // Convert canvas to blob
-    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+    if (!canvas || (canvas.width | 0) <= 0 || (canvas.height | 0) <= 0) {
+      return null;
+    }
+    // Convert canvas to blob (fallback to tiny blank PNG if null)
+    const blob = await new Promise(resolve => canvas.toBlob(b => resolve(b || new Blob([new Uint8Array([137,80,78,71])], { type: 'image/png' })), 'image/png'));
 
     // Perform OCR
     const { data } = await Tesseract.recognize(blob, languages, {
