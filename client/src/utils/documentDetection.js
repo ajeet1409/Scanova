@@ -24,7 +24,8 @@ export const detectDocument = (canvas, options = {}) => {
     cannyLow = 50,
     cannyHigh = 150,
     useAdaptiveThreshold = true,
-    combineResults = true
+    combineResults = true,
+    fast = false
   } = options;
 
   // Validate canvas
@@ -57,14 +58,69 @@ export const detectDocument = (canvas, options = {}) => {
       return null;
     }
 
-  const results = [];
+    // Fast path: downscaled quick detection for responsive hover feedback
+    if (fast) {
+      try {
+        const targetW = 320;
+        const scale = Math.min(1, targetW / width);
+        let sw = width, sh = height;
+        let smallGray = grayData;
 
-  try {
+        if (scale < 1) {
+          const dw = Math.max(1, Math.round(width * scale));
+          const dh = Math.max(1, Math.round(height * scale));
+          const off = document.createElement('canvas');
+          off.width = dw; off.height = dh;
+          const octx = off.getContext('2d');
+          octx.drawImage(canvas, 0, 0, dw, dh);
+          const smallImage = octx.getImageData(0, 0, dw, dh);
+          smallGray = toGrayscale(smallImage);
+          sw = dw; sh = dh;
+        }
+
+        // Quick Canny + contours
+        const edges = cannyEdgeDetection(smallGray, sw, sh, cannyLow, cannyHigh);
+        let contours = [];
+        try { contours = findContours(edges, sw, sh); } catch { /* no-op */ }
+        let doc = null;
+        try { doc = findDocumentBoundary(contours, Math.max(100, Math.round(minArea * scale * scale))); } catch { /* no-op */ }
+
+        if (!doc) {
+          // Fallback to enhanced edge projection on downscaled data
+          doc = enhancedEdgeDetection(smallGray, sw, sh, Math.max(100, Math.round(minArea * scale * scale)));
+        }
+
+        if (!doc) return null;
+        const bb = doc.boundingBox;
+        const inv = scale === 0 ? 1 : (1 / scale);
+
+        const mapped = {
+          ...doc,
+          boundingBox: {
+            x: Math.max(0, Math.round(bb.x * inv)),
+            y: Math.max(0, Math.round(bb.y * inv)),
+            width: Math.min(width, Math.round(bb.width * inv)),
+            height: Math.min(height, Math.round(bb.height * inv))
+          },
+          contour: Array.isArray(doc.contour)
+            ? doc.contour.map(p => ({ x: Math.round(p.x * inv), y: Math.round(p.y * inv) }))
+            : undefined,
+          score: Math.min(1, (doc.score || 0.5) + 0.05) // small boost for responsiveness
+        };
+        return mapped;
+      } catch (e) {
+        console.warn('Fast document detection failed, falling back:', e);
+        // Continue to full detection below
+      }
+    }
+
+    const results = [];
+
     // Method 1: Canny edge detection + contour finding
     const cannyEdges = cannyEdgeDetection(grayData, width, height, cannyLow, cannyHigh);
     const cannyContours = findContours(cannyEdges, width, height);
     const cannyDoc = findDocumentBoundary(cannyContours, minArea);
-    
+
     if (cannyDoc) {
       results.push({
         method: 'canny',
@@ -79,7 +135,7 @@ export const detectDocument = (canvas, options = {}) => {
       const adaptiveBinary = adaptiveThreshold(grayData, width, height, 15, 10);
       const adaptiveContours = findContours(adaptiveBinary, width, height);
       const adaptiveDoc = findDocumentBoundary(adaptiveContours, minArea);
-      
+
       if (adaptiveDoc) {
         results.push({
           method: 'adaptive',
@@ -112,21 +168,21 @@ export const detectDocument = (canvas, options = {}) => {
       });
     }
 
+    if (results.length === 0) return null;
+
+    // Combine results or return best single result
+    if (combineResults && results.length > 1) {
+      return combineDetectionResults(results);
+    } else {
+      // Return result with highest weighted confidence
+      const best = results.reduce((a, b) =>
+        (a.confidence * a.weight) > (b.confidence * b.weight) ? a : b
+      );
+      return best.boundary;
+    }
   } catch (error) {
     console.error('Error in document detection:', error);
-  }
-
-  if (results.length === 0) return null;
-
-  // Combine results or return best single result
-  if (combineResults && results.length > 1) {
-    return combineDetectionResults(results, width, height);
-  } else {
-    // Return result with highest weighted confidence
-    const best = results.reduce((a, b) => 
-      (a.confidence * a.weight) > (b.confidence * b.weight) ? a : b
-    );
-    return best.boundary;
+    return null;
   }
 };
 
@@ -163,7 +219,6 @@ const enhancedEdgeDetection = (grayData, width, height, minArea) => {
     const blurredGray = toGrayscale(blurred);
 
     // Enhanced Sobel edge detection
-    const totalPixels = width * height;
     const mag = new Float32Array(totalPixels);
 
     for (let y = 1; y < height - 1; y++) {
@@ -404,7 +459,7 @@ const otsuThreshold = (data) => {
  * @param {number} height - Image height
  * @returns {Object} Combined result
  */
-const combineDetectionResults = (results, width, height) => {
+const combineDetectionResults = (results) => {
   // For now, return the result with highest weighted confidence
   // Future enhancement: implement actual result fusion
   const best = results.reduce((a, b) => 

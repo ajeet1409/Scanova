@@ -20,7 +20,8 @@ export const enhancedOCR = async (input, options = {}) => {
     useMultiplePreprocessing = true,
     confidenceThreshold = 60,
     enableSpellCheck = true,
-    maxRetries = 2
+    maxRetries = 2,
+    fast = false
   } = options;
 
   const results = [];
@@ -28,9 +29,25 @@ export const enhancedOCR = async (input, options = {}) => {
 
   try {
     // Convert input to canvas if needed
-    const canvas = await inputToCanvas(input);
-    
-    if (useMultiplePreprocessing) {
+    let canvas = await inputToCanvas(input);
+
+    // If fast mode, optionally downscale to speed OCR
+    if (fast && canvas.width > 700) {
+      const scale = 700 / canvas.width;
+      const dw = 700;
+      const dh = Math.round(canvas.height * scale);
+      const off = document.createElement('canvas');
+      off.width = dw; off.height = dh;
+      const octx = off.getContext('2d');
+      octx.drawImage(canvas, 0, 0, dw, dh);
+      canvas = off;
+    }
+
+    const multi = fast ? false : useMultiplePreprocessing;
+    const localPsm = fast ? Tesseract.PSM.SINGLE_BLOCK : psm;
+    const localEnableSpell = fast ? false : enableSpellCheck;
+
+    if (multi) {
       // Try multiple preprocessing approaches
       const preprocessingMethods = [
         { name: 'original', processor: (c) => c },
@@ -45,7 +62,7 @@ export const enhancedOCR = async (input, options = {}) => {
           const processedCanvas = method.processor(canvas);
           const result = await performOCR(processedCanvas, {
             languages,
-            psm,
+            psm: localPsm,
             oem,
             method: method.name
           });
@@ -58,16 +75,16 @@ export const enhancedOCR = async (input, options = {}) => {
         }
       }
     } else {
-      // Single preprocessing approach
-      const processedCanvas = enhanceForOCR(canvas);
-      const result = await performOCR(processedCanvas, { languages, psm, oem });
+      // Single, faster preprocessing when in fast mode
+      const processedCanvas = fast ? adaptivePreprocessing(canvas) : enhanceForOCR(canvas);
+      const result = await performOCR(processedCanvas, { languages, psm: localPsm, oem });
       if (result) results.push(result);
     }
 
     // Select best result based on confidence and text quality
     bestResult = selectBestResult(results, confidenceThreshold);
 
-    if (bestResult && enableSpellCheck) {
+    if (bestResult && localEnableSpell) {
       bestResult.text = await spellCheckAndCorrect(bestResult.text);
       bestResult.corrected = true;
     }

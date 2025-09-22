@@ -1,7 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import Webcam from "react-webcam";
-import * as tf from "@tensorflow/tfjs";
-import * as cocossd from "@tensorflow-models/coco-ssd";
 import { detectDocument } from "../utils/documentDetection.js";
 import { enhancedOCR, validateOCRResult } from "../utils/enhancedOCR.js";
 import { loadCocoSsdModel, optimizeForMobile } from "../utils/tensorflowSetup.js";
@@ -50,7 +48,7 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
   };
 
   // Enhanced overlay drawing with better visual feedback
-  const drawOverlay = (bbox, score, label) => {
+  const drawOverlay = useCallback((bbox, score, label) => {
     const canvas = canvasRef.current;
     const video = webcamRef.current?.video;
     if (!canvas || !video) return;
@@ -140,10 +138,10 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
         ctx.setLineDash([]); // Reset dash
       }
     }
-  };
+  }, [isProcessing]);
 
   // Capture current frame to an offscreen canvas and return it
-  const captureFrameCanvas = () => {
+  const captureFrameCanvas = useCallback(() => {
     const video = webcamRef.current?.video;
     if (!video) return null;
     const c = tmpCanvasRef.current;
@@ -152,10 +150,10 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
     const ctx = c.getContext('2d');
     ctx.drawImage(video, 0, 0, c.width, c.height);
     return c;
-  };
+  }, []);
 
   // Simple and robust edge-based document detection (fallback method)
-  const findDocumentByEdges = (canvas) => {
+  const findDocumentByEdges = useCallback((canvas) => {
     try {
       const w = canvas.width;
       const h = canvas.height;
@@ -264,10 +262,10 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
       console.error('Edge detection failed', err);
       return null;
     }
-  };
+  }, []);
 
   // Enhanced detection loop using multiple approaches
-  const detectLoop = async () => {
+  const detectLoop = useCallback(async () => {
     if (!webcamRef.current || !webcamRef.current.video) return;
     const video = webcamRef.current.video;
     if (video.readyState !== 4) return;
@@ -278,6 +276,44 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
     let method = 'none';
 
     try {
+      // Fast path: quick downscaled detection for instant hover feedback
+      {
+        const frameFast = captureFrameCanvas();
+        if (frameFast && frameFast.width > 0 && frameFast.height > 0) {
+          try {
+            const quickDoc = detectDocument(frameFast, {
+              fast: true,
+              combineResults: false,
+              minArea: Math.max(600, (videoW * videoH) * 0.03), // smaller threshold for quick pass
+              cannyLow: 60,
+              cannyHigh: 140
+            });
+            if (quickDoc && quickDoc.score > 0.35) {
+              const bb = quickDoc.boundingBox;
+              detectedDoc = {
+                x: Math.max(0, bb.x),
+                y: Math.max(0, bb.y),
+                w: Math.min(videoW - bb.x, bb.width),
+                h: Math.min(videoH - bb.y, bb.height),
+                confidence: quickDoc.score,
+                class: 'document'
+              };
+              method = 'fast';
+              // Draw overlay immediately for responsive UI
+              drawOverlay(detectedDoc, detectedDoc.confidence, detectedDoc.class);
+              // If very confident, skip heavier methods
+              if (detectedDoc.confidence >= 0.7) {
+                setDocBBox(detectedDoc);
+                setDetectionMethod(method);
+                return;
+              }
+            }
+          } catch {
+            // ignore quick detection errors; continue to other methods
+          }
+        }
+      }
+
       // Method 1: COCO-SSD model detection (if available)
       if (net) {
         try {
@@ -347,7 +383,6 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
             console.warn('Enhanced document detection failed:', enhancedError);
           }
         }
-        }
       }
 
       // Update state and UI
@@ -386,7 +421,7 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
         setDetectionMethod('failed');
       }
     }
-  };
+  }, [net, drawOverlay, captureFrameCanvas, findDocumentByEdges]);
 
   // Run continuous detection using requestAnimationFrame loop
   useEffect(() => {
@@ -397,7 +432,7 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
     };
     loop();
     return () => cancelAnimationFrame(raf);
-  }, [net]);
+  }, [detectLoop]);
 
   // const runHandPose = async () => {
   //   setisLoading(true);
@@ -424,7 +459,9 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
       if (isMobile) {
         setCameraMode('environment');
       }
-    } catch (e) {}
+    } catch {
+      // Ignore errors in mobile detection
+    }
   }, []);
 
   // Try to enumerate devices and pick a rear camera deviceId if available
@@ -437,7 +474,7 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
         let tempStream = null;
         try {
           tempStream = await navigator.mediaDevices.getUserMedia({ video: true });
-        } catch (err) {
+        } catch {
           // ignore: permission may be denied — we'll still try to enumerate
         }
 
@@ -525,10 +562,11 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
         // Use enhanced OCR with multiple preprocessing approaches
         const ocrResult = await enhancedOCR(processedCanvas, {
           languages: 'eng',
-          useMultiplePreprocessing: true,
+          fast: true,
+          useMultiplePreprocessing: false,
           confidenceThreshold: 30, // Lower threshold for real-time processing
-          enableSpellCheck: true,
-          maxRetries: 1 // Limit retries for real-time performance
+          enableSpellCheck: false,
+          maxRetries: 0 // No retries in fast mode
         });
 
         if (ocrResult.success && ocrResult.text.length > 0) {
@@ -583,7 +621,7 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
       } finally {
         setIsProcessing(false);
       }
-    }, 1000); // Slightly longer debounce for better stability
+    }, 350); // Faster debounce for quicker text extraction
 
     return () => {
       if (extractionTimerRef.current) {
@@ -591,7 +629,7 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
         extractionTimerRef.current = null;
       }
     };
-  }, [docBBox]);
+  }, [docBBox, captureFrameCanvas, onTextExtracted, onSolutionGenerated]);
 
   // Note: OCR/capture is automatic when a document bbox is detected
 
