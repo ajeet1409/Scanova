@@ -23,7 +23,6 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
 
   // TensorFlow COCO-SSD removed; using Python backend for detection
   const textScanTimerRef = useRef(null);
-  const [showTextPanel, setShowTextPanel] = useState(false);
 
 
   // Enhanced overlay drawing with better visual feedback
@@ -328,7 +327,7 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
           wordCount: ocrResult.metadata.totalAttempts,
           corrected: ocrResult.metadata.corrected,
         });
-        setShowTextPanel(true);
+
         if (typeof onTextExtracted === 'function') onTextExtracted(ocrResult.text);
         if (typeof onSolutionGenerated === 'function') onSolutionGenerated(ocrResult.text);
       }
@@ -701,7 +700,7 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
 
     textScanTimerRef.current = setTimeout(() => {
       quickTextScan();
-    }, 900);
+    }, 700);
 
     return () => {
       if (textScanTimerRef.current) {
@@ -715,9 +714,9 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
   // Note: OCR/capture is automatic when a document bbox is detected
 
   return (
-    <div className="relative w-full h-full">
+    <div className="fixed inset-0 w-screen h-screen bg-black">
       {/* Camera Preview Container */}
-      <div className="relative w-full bg-gradient-to-br from-gray-900 to-black rounded-2xl overflow-hidden shadow-2xl">
+      <div className="absolute inset-0 overflow-hidden">
         {/* Header */}
         <div className="absolute top-0 left-0 right-0 z-30 camera-overlay bg-gradient-to-b from-black/70 to-transparent p-4">
           <div className="flex items-center justify-between">
@@ -736,8 +735,17 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
           </p>
         </div>
 
+        {/* Small status badge (mode/time) */}
+        <div className="absolute top-14 right-4 z-30 text-xs text-white/70 space-y-0.5">
+          {detectionMethod && <div className="bg-black/40 px-2 py-1 rounded border border-white/10">Mode: {detectionMethod}</div>}
+          {processingStats?.processingTime != null && (
+            <div className="bg-black/40 px-2 py-1 rounded border border-white/10">Time: {processingStats.processingTime}ms</div>
+          )}
+        </div>
+
+
         {/* Camera View */}
-        <div className="relative w-full aspect-[4/3] bg-black">
+        <div className="absolute inset-0 bg-black">
           <Webcam
             ref={webcamRef}
             audio={false}
@@ -754,6 +762,26 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
             style={{ zIndex: 12 }}
           />
 
+
+          {/* Inline Solution/Text Overlay */}
+          <div className="absolute top-16 left-4 right-4 z-20">
+            {ocrText && (
+              <div className="bg-black/60 backdrop-blur-sm text-white p-3 rounded-xl border border-white/20 max-h-[40vh] overflow-y-auto shadow-lg">
+                <div className="flex items-center justify-between mb-2 text-xs text-white/70">
+                  <span>Solution</span>
+                  {ocrConfidence > 0 && (
+                    <span className="px-2 py-0.5 rounded-full bg-white/10 border border-white/20">
+                      {ocrConfidence}%
+                    </span>
+                  )}
+                </div>
+                <div className="text-sm whitespace-pre-wrap leading-relaxed">
+                  {ocrText}
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* Camera Controls Overlay - Mobile Camera Style */}
           <div className="absolute bottom-6 left-4 right-4 z-20 flex items-center justify-between">
             {/* Flip Camera */}
@@ -766,22 +794,7 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
             </button>
 
             {/* Shutter Button */}
-            <button
-              onClick={quickTextScan}
-              className="w-20 h-20 rounded-full bg-white/70 border-2 border-white shadow-lg flex items-center justify-center active:scale-95 transition"
-              disabled={isProcessing || isLoading}
-              aria-label="Capture Text"
-            >
-              <span className="w-16 h-16 rounded-full bg-white border-4 border-white/80"></span>
-            </button>
 
-            {/* Toggle Text Panel */}
-            <button
-              onClick={() => setShowTextPanel(v => !v)}
-              className="camera-overlay camera-button-hover bg-white/20 text-white px-4 py-2 rounded-full border border-white/30 hover:bg-white/30 transition-all duration-200 shadow-lg"
-            >
-              {showTextPanel ? 'Hide Text' : 'Show Text'}
-            </button>
           </div>
 
           {/* Loading Overlay */}
@@ -806,67 +819,6 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
           )}
         </div>
 
-        {/* Extracted Text Panel (toggleable) */}
-        {showTextPanel && (
-          <div className="bg-gradient-to-r from-gray-800 via-gray-900 to-gray-800 p-4 border-t border-gray-700/50">
-            <div className="flex items-center justify-between mb-3">
-              <h4 className="text-white font-medium flex items-center gap-2">
-                📝 Extracted Text
-                {isProcessing && <div className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse"></div>}
-              </h4>
-              <div className="flex items-center gap-2">
-                {ocrConfidence > 0 && (
-                  <div className={`text-xs px-2 py-1 rounded-full border ${
-                    ocrConfidence >= 80 ? 'bg-green-500/20 text-green-400 border-green-500/30' :
-                    ocrConfidence >= 60 ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30' :
-                    'bg-red-500/20 text-red-400 border-red-500/30'
-                  }`}>
-                    {ocrConfidence}% confident
-                  </div>
-                )}
-                <div className="text-xs text-gray-400 bg-gray-700/50 px-3 py-1 rounded-full border border-gray-600">
-                  {isProcessing ? (
-                    <span className="flex items-center gap-1">
-                      <div className="w-1 h-1 bg-yellow-400 rounded-full animate-pulse"></div>
-                      Processing...
-                    </span>
-                  ) : ocrText ? (
-                    <span className="text-green-400">{ocrText.length} chars</span>
-                  ) : (
-                    <span className="text-gray-500">Waiting</span>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            {processingStats && (
-              <div className="mb-3 text-xs text-gray-400 flex items-center gap-4">
-                <span>Method: {processingStats.method}</span>
-                <span>Time: {processingStats.processingTime}ms</span>
-                {processingStats.corrected && <span className="text-blue-400">✨ Spell-checked</span>}
-              </div>
-            )}
-
-            <div className="bg-gray-900/70 rounded-xl p-4 min-h-[100px] max-h-40 overflow-y-auto border border-gray-700/50">
-              <div className="text-sm text-gray-200 break-words whitespace-pre-wrap leading-relaxed">
-                {ocrText ? (
-                  <span className="text-gray-100">{ocrText}</span>
-                ) : (
-                  <span className="text-gray-500 italic flex items-center gap-2">
-                    <div className="text-lg">👁️</div>
-                    No text detected yet. Position a document clearly in the camera view for automatic scanning.
-                  </span>
-                )}
-              </div>
-            </div>
-
-            {detectionMethod && detectionMethod !== 'none' && (
-              <div className="mt-2 text-xs text-gray-500 flex items-center gap-2">
-                <span>🔍 Detection: {detectionMethod}</span>
-              </div>
-            )}
-          </div>
-        )}
       </div>
     </div>
   );
