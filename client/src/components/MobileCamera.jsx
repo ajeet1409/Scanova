@@ -22,6 +22,9 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
   const extractionTimerRef = useRef(null);
 
   // TensorFlow COCO-SSD removed; using Python backend for detection
+  const textScanTimerRef = useRef(null);
+  const [showTextPanel, setShowTextPanel] = useState(false);
+
 
   // Enhanced overlay drawing with better visual feedback
   const drawOverlay = useCallback((bbox, score, label) => {
@@ -289,6 +292,52 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
 
     return { x, y, w, h, confidence: best.score ?? 0.5, class: best.label || 'object' };
   }, []);
+
+  // Quick text scan when no document is detected
+  const quickTextScan = useCallback(async () => {
+    if (isProcessing) return;
+    try {
+      setIsProcessing(true);
+      setOcrConfidence(0);
+      setProcessingStats(null);
+      const frame = captureFrameCanvas();
+      if (!frame) return;
+      // Downscale for performance
+      const maxDim = 1200;
+      let processedCanvas = frame;
+      if (frame.width > maxDim || frame.height > maxDim) {
+        const scale = Math.min(maxDim / frame.width, maxDim / frame.height);
+        const resized = document.createElement('canvas');
+        resized.width = Math.round(frame.width * scale);
+        resized.height = Math.round(frame.height * scale);
+        resized.getContext('2d').drawImage(frame, 0, 0, resized.width, resized.height);
+        processedCanvas = resized;
+      }
+      const ocrResult = await enhancedOCR(processedCanvas, {
+        languages: 'eng', fast: true, useMultiplePreprocessing: false,
+        confidenceThreshold: 25, enableSpellCheck: false, maxRetries: 0
+      });
+      if (ocrResult.success && ocrResult.text.length > 0) {
+        setOcrText(ocrResult.text);
+        setOcrConfidence(ocrResult.confidence);
+        setDetectionMethod(`text-only+${ocrResult.method}`);
+        setProcessingStats({
+          confidence: ocrResult.confidence,
+          method: ocrResult.method,
+          processingTime: ocrResult.metadata.processingTime,
+          wordCount: ocrResult.metadata.totalAttempts,
+          corrected: ocrResult.metadata.corrected,
+        });
+        setShowTextPanel(true);
+        if (typeof onTextExtracted === 'function') onTextExtracted(ocrResult.text);
+        if (typeof onSolutionGenerated === 'function') onSolutionGenerated(ocrResult.text);
+      }
+    } catch (err) {
+      console.warn('Quick text scan failed:', err);
+    } finally {
+      setIsProcessing(false);
+    }
+  }, [isProcessing, captureFrameCanvas, onTextExtracted, onSolutionGenerated]);
 
 
   // Enhanced detection loop using multiple approaches
@@ -642,6 +691,27 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
     };
   }, [docBBox, captureFrameCanvas, onTextExtracted, onSolutionGenerated]);
 
+  // Fallback: if no document bbox, periodically run a quick text-only scan
+  useEffect(() => {
+    if (textScanTimerRef.current) {
+      clearTimeout(textScanTimerRef.current);
+      textScanTimerRef.current = null;
+    }
+    if (docBBox) return; // document present; normal OCR flow handles it
+
+    textScanTimerRef.current = setTimeout(() => {
+      quickTextScan();
+    }, 900);
+
+    return () => {
+      if (textScanTimerRef.current) {
+        clearTimeout(textScanTimerRef.current);
+        textScanTimerRef.current = null;
+      }
+    };
+  }, [docBBox, quickTextScan]);
+
+
   // Note: OCR/capture is automatic when a document bbox is detected
 
   return (
@@ -684,43 +754,34 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
             style={{ zIndex: 12 }}
           />
 
-          {/* Camera Controls Overlay */}
-          <div className="absolute bottom-4 left-4 right-4 z-20 flex items-center justify-between">
-            {/* Camera Switch Button */}
+          {/* Camera Controls Overlay - Mobile Camera Style */}
+          <div className="absolute bottom-6 left-4 right-4 z-20 flex items-center justify-between">
+            {/* Flip Camera */}
             <button
               onClick={() => setCameraMode(prev => prev === 'user' ? 'environment' : 'user')}
               className="camera-overlay camera-button-hover bg-white/20 text-white px-4 py-2 rounded-full border border-white/30 hover:bg-white/30 transition-all duration-200 shadow-lg"
               disabled={isLoading}
             >
-              <span className="flex items-center gap-2">
-                🔄 {cameraMode === 'user' ? 'Switch to Rear' : 'Switch to Front'}
-              </span>
+              <span className="flex items-center gap-2">🔄 {cameraMode === 'user' ? 'Rear' : 'Front'}</span>
             </button>
 
-            {/* Enhanced Status Indicator */}
-            <div className="camera-overlay bg-black/50 text-white px-4 py-2 rounded-full text-sm border border-white/20">
-              {isProcessing ? (
-                <span className="flex items-center gap-2">
-                  <div className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse"></div>
-                  🔍 Processing OCR...
-                </span>
-              ) : docBBox ? (
-                <span className="flex items-center gap-2">
-                  <div className="w-2 h-2 bg-green-400 rounded-full"></div>
-                  ✅ Doc Found
-                  {ocrConfidence > 0 && (
-                    <span className="text-xs bg-green-500/20 px-2 py-1 rounded">
-                      {ocrConfidence}% confident
-                    </span>
-                  )}
-                </span>
-              ) : (
-                <span className="flex items-center gap-2">
-                  <div className="w-2 h-2 bg-blue-400 rounded-full animate-pulse"></div>
-                  🔍 Searching...
-                </span>
-              )}
-            </div>
+            {/* Shutter Button */}
+            <button
+              onClick={quickTextScan}
+              className="w-20 h-20 rounded-full bg-white/70 border-2 border-white shadow-lg flex items-center justify-center active:scale-95 transition"
+              disabled={isProcessing || isLoading}
+              aria-label="Capture Text"
+            >
+              <span className="w-16 h-16 rounded-full bg-white border-4 border-white/80"></span>
+            </button>
+
+            {/* Toggle Text Panel */}
+            <button
+              onClick={() => setShowTextPanel(v => !v)}
+              className="camera-overlay camera-button-hover bg-white/20 text-white px-4 py-2 rounded-full border border-white/30 hover:bg-white/30 transition-all duration-200 shadow-lg"
+            >
+              {showTextPanel ? 'Hide Text' : 'Show Text'}
+            </button>
           </div>
 
           {/* Loading Overlay */}
@@ -745,70 +806,67 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
           )}
         </div>
 
-        {/* Enhanced Extracted Text Panel */}
-        <div className="bg-gradient-to-r from-gray-800 via-gray-900 to-gray-800 p-4 border-t border-gray-700/50">
-          <div className="flex items-center justify-between mb-3">
-            <h4 className="text-white font-medium flex items-center gap-2">
-              📝 Extracted Text
-              {isProcessing && <div className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse"></div>}
-            </h4>
-            <div className="flex items-center gap-2">
-              {/* Confidence Badge */}
-              {ocrConfidence > 0 && (
-                <div className={`text-xs px-2 py-1 rounded-full border ${
-                  ocrConfidence >= 80 ? 'bg-green-500/20 text-green-400 border-green-500/30' :
-                  ocrConfidence >= 60 ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30' :
-                  'bg-red-500/20 text-red-400 border-red-500/30'
-                }`}>
-                  {ocrConfidence}% confident
+        {/* Extracted Text Panel (toggleable) */}
+        {showTextPanel && (
+          <div className="bg-gradient-to-r from-gray-800 via-gray-900 to-gray-800 p-4 border-t border-gray-700/50">
+            <div className="flex items-center justify-between mb-3">
+              <h4 className="text-white font-medium flex items-center gap-2">
+                📝 Extracted Text
+                {isProcessing && <div className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse"></div>}
+              </h4>
+              <div className="flex items-center gap-2">
+                {ocrConfidence > 0 && (
+                  <div className={`text-xs px-2 py-1 rounded-full border ${
+                    ocrConfidence >= 80 ? 'bg-green-500/20 text-green-400 border-green-500/30' :
+                    ocrConfidence >= 60 ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30' :
+                    'bg-red-500/20 text-red-400 border-red-500/30'
+                  }`}>
+                    {ocrConfidence}% confident
+                  </div>
+                )}
+                <div className="text-xs text-gray-400 bg-gray-700/50 px-3 py-1 rounded-full border border-gray-600">
+                  {isProcessing ? (
+                    <span className="flex items-center gap-1">
+                      <div className="w-1 h-1 bg-yellow-400 rounded-full animate-pulse"></div>
+                      Processing...
+                    </span>
+                  ) : ocrText ? (
+                    <span className="text-green-400">{ocrText.length} chars</span>
+                  ) : (
+                    <span className="text-gray-500">Waiting</span>
+                  )}
                 </div>
-              )}
+              </div>
+            </div>
 
-              {/* Character Count */}
-              <div className="text-xs text-gray-400 bg-gray-700/50 px-3 py-1 rounded-full border border-gray-600">
-                {isProcessing ? (
-                  <span className="flex items-center gap-1">
-                    <div className="w-1 h-1 bg-yellow-400 rounded-full animate-pulse"></div>
-                    Processing...
-                  </span>
-                ) : ocrText ? (
-                  <span className="text-green-400">{ocrText.length} chars</span>
+            {processingStats && (
+              <div className="mb-3 text-xs text-gray-400 flex items-center gap-4">
+                <span>Method: {processingStats.method}</span>
+                <span>Time: {processingStats.processingTime}ms</span>
+                {processingStats.corrected && <span className="text-blue-400">✨ Spell-checked</span>}
+              </div>
+            )}
+
+            <div className="bg-gray-900/70 rounded-xl p-4 min-h-[100px] max-h-40 overflow-y-auto border border-gray-700/50">
+              <div className="text-sm text-gray-200 break-words whitespace-pre-wrap leading-relaxed">
+                {ocrText ? (
+                  <span className="text-gray-100">{ocrText}</span>
                 ) : (
-                  <span className="text-gray-500">Waiting</span>
+                  <span className="text-gray-500 italic flex items-center gap-2">
+                    <div className="text-lg">👁️</div>
+                    No text detected yet. Position a document clearly in the camera view for automatic scanning.
+                  </span>
                 )}
               </div>
             </div>
+
+            {detectionMethod && detectionMethod !== 'none' && (
+              <div className="mt-2 text-xs text-gray-500 flex items-center gap-2">
+                <span>🔍 Detection: {detectionMethod}</span>
+              </div>
+            )}
           </div>
-
-          {/* Processing Stats */}
-          {processingStats && (
-            <div className="mb-3 text-xs text-gray-400 flex items-center gap-4">
-              <span>Method: {processingStats.method}</span>
-              <span>Time: {processingStats.processingTime}ms</span>
-              {processingStats.corrected && <span className="text-blue-400">✨ Spell-checked</span>}
-            </div>
-          )}
-
-          <div className="bg-gray-900/70 rounded-xl p-4 min-h-[100px] max-h-40 overflow-y-auto border border-gray-700/50">
-            <div className="text-sm text-gray-200 break-words whitespace-pre-wrap leading-relaxed">
-              {ocrText ? (
-                <span className="text-gray-100">{ocrText}</span>
-              ) : (
-                <span className="text-gray-500 italic flex items-center gap-2">
-                  <div className="text-lg">👁️</div>
-                  No text detected yet. Position a document clearly in the camera view for automatic scanning.
-                </span>
-              )}
-            </div>
-          </div>
-
-          {/* Detection Method Info */}
-          {detectionMethod && detectionMethod !== 'none' && (
-            <div className="mt-2 text-xs text-gray-500 flex items-center gap-2">
-              <span>🔍 Detection: {detectionMethod}</span>
-            </div>
-          )}
-        </div>
+        )}
       </div>
     </div>
   );
