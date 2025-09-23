@@ -7,6 +7,7 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
   const webcamRef = useRef(null);
   const canvasRef = useRef(null); // overlay canvas
   const tmpCanvasRef = useRef(document.createElement("canvas")); // offscreen
+  const fileInputRef = useRef(null); // hidden file input for mobile upload
 
   // default to rear camera
   const [cameraMode, setCameraMode] = useState("environment");
@@ -30,6 +31,35 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
   const pyInFlightRef = useRef(false);
   const pyLastCallRef = useRef(0);
   const pyBackoffUntilRef = useRef(0);
+
+  // Performance knobs
+  const DETECT_OCR_TIMEOUT_MS = 4000; // hard cap per OCR/detect call
+
+  // Helpers
+  const withTimeout = useCallback(async (promise, ms, fallback = null) => {
+    let timeoutId;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise((resolve) => {
+          timeoutId = setTimeout(() => resolve(fallback), ms);
+        })
+      ]);
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
+    }
+  }, []);
+
+  const fetchWithTimeout = useCallback(async (url, options = {}, timeoutMs = DETECT_OCR_TIMEOUT_MS) => {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { ...options, signal: controller.signal });
+      return res;
+    } finally {
+      clearTimeout(id);
+    }
+  }, []);
 
   // Enhanced overlay drawing with better visual feedback
   const drawOverlay = useCallback((bbox, score, label) => {
@@ -257,7 +287,7 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
     const originalH = canvas.height;
 
     // Downscale for bandwidth/perf
-    const maxW = 640;
+    const maxW = 480;
     const scale = Math.min(1, maxW / originalW);
     let sendCanvas = canvas;
     if (scale < 1) {
@@ -274,9 +304,9 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
     const form = new FormData();
     form.append('image', blob, 'frame.jpg');
 
-    const PY_URL = 'http://127.0.0.1:8001/detect'; // configure as needed
-    const res = await fetch(PY_URL, { method: 'POST', body: form });
-    if (!res.ok) throw new Error(`Python service error: ${res.status}`);
+    const PY_URL = 'http://127.0.0.1:8001/detect?imgsz=384&conf=0.25';
+    const res = await fetchWithTimeout(PY_URL, { method: 'POST', body: form }, DETECT_OCR_TIMEOUT_MS);
+    if (!res || !res.ok) throw new Error(`Python service error: ${res ? res.status : 'timeout'}`);
     const data = await res.json();
     if (!data.success || !Array.isArray(data.detections) || data.detections.length === 0) return null;
 
@@ -299,7 +329,76 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
     if (w < originalW * 0.08 || h < originalH * 0.08) return null;
 
     return { x, y, w, h, confidence: best.score ?? 0.5, class: best.label || 'object' };
+  }, [fetchWithTimeout, DETECT_OCR_TIMEOUT_MS]);
+
+  // Upload: send selected image to Python /detect_ocr and display result
+  const pyDetectAndOCRFile = useCallback(async (file) => {
+    if (!file) return;
+    setIsProcessing(true);
+      setOcrText(prev => prev || 'Analyzing...');
+      setDetectionMethod('upload-processing');
+    try {
+      const form = new FormData();
+      form.append('image', file, file.name || 'upload.jpg');
+      const url = 'http://127.0.0.1:8001/detect_ocr?conf=0.3&preferred_only=true&max_results=1';
+      const res = await fetchWithTimeout(url, { method: 'POST', body: form }, DETECT_OCR_TIMEOUT_MS);
+      if (res && res.ok) {
+        const data = await res.json();
+        if (data?.success && Array.isArray(data.detections) && data.detections.length > 0) {
+          const best = data.detections.reduce((a, b) => ((a?.text?.length || 0) > (b?.text?.length || 0) ? a : b));
+          const combinedText = data.detections.map(d => d.text).filter(Boolean).join('\n').trim() || best?.text || '';
+          if (combinedText) {
+            setOcrText(combinedText);
+            setOcrConfidence(Math.round((best?.score || 0) * 100));
+            setDetectionMethod(`upload-ocr-${data?.detector || 'py'}`);
+            setDocBBox(null); // avoid misaligned border on live camera
+            onTextExtracted?.(combinedText);
+            onSolutionGenerated?.(combinedText);
+            return;
+          }
+        }
+      }
+      // Fallback: run local enhanced OCR on the uploaded image
+      try {
+        const bmp = await createImageBitmap(file);
+        const c = tmpCanvasRef.current;
+        const maxW = 1280;
+        const scale = Math.min(1, maxW / (bmp.width || maxW));
+        c.width = Math.max(1, Math.round(bmp.width * scale));
+        c.height = Math.max(1, Math.round(bmp.height * scale));
+        const ctx = c.getContext('2d');
+        ctx.drawImage(bmp, 0, 0, c.width, c.height);
+        const ocrResult = await withTimeout(enhancedOCR(c, { fast: true, useMultiplePreprocessing: false, confidenceThreshold: 25, enableSpellCheck: false }), DETECT_OCR_TIMEOUT_MS, { success: false, text: '', confidence: 0 });
+        if (ocrResult?.success && ocrResult.text) {
+          setOcrText(ocrResult.text);
+          setOcrConfidence(Math.round(ocrResult.confidence || 0));
+          setDetectionMethod('upload-local-ocr');
+          setDocBBox(null);
+          onTextExtracted?.(ocrResult.text);
+          onSolutionGenerated?.(ocrResult.text);
+        }
+      } catch (e) {
+        console.warn('Local OCR fallback failed:', e);
+      }
+    } catch (e) {
+      console.warn('Upload detect+ocr failed:', e);
+    } finally {
+      setIsProcessing(false);
+    }
+  }, [onTextExtracted, onSolutionGenerated, fetchWithTimeout, withTimeout, DETECT_OCR_TIMEOUT_MS]);
+
+  const handleOpenPicker = useCallback(() => {
+    fileInputRef.current?.click();
   }, []);
+
+  const handleFileChange = useCallback(async (e) => {
+    const file = e.target?.files?.[0];
+    if (file) {
+      await pyDetectAndOCRFile(file);
+      // reset input so selecting same file again still triggers change
+      e.target.value = '';
+    }
+  }, [pyDetectAndOCRFile]);
 
   // Quick text scan when no document is detected
   const quickTextScan = useCallback(async () => {
@@ -308,10 +407,12 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
       setIsProcessing(true);
       setOcrConfidence(0);
       setProcessingStats(null);
+      setOcrText(prev => prev || 'Analyzing...');
+      setDetectionMethod('text-scan-processing');
       const frame = captureFrameCanvas();
       if (!frame) return;
       // Downscale for performance
-      const maxDim = 1200;
+      const maxDim = 900;
       let processedCanvas = frame;
       if (frame.width > maxDim || frame.height > maxDim) {
         const scale = Math.min(maxDim / frame.width, maxDim / frame.height);
@@ -321,10 +422,14 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
         resized.getContext('2d').drawImage(frame, 0, 0, resized.width, resized.height);
         processedCanvas = resized;
       }
-      const ocrResult = await enhancedOCR(processedCanvas, {
-        languages: 'eng', fast: true, useMultiplePreprocessing: false,
-        confidenceThreshold: 25, enableSpellCheck: false, maxRetries: 0
-      });
+      const ocrResult = await withTimeout(
+        enhancedOCR(processedCanvas, {
+          languages: 'eng', fast: true, useMultiplePreprocessing: false,
+          confidenceThreshold: 25, enableSpellCheck: false
+        }),
+        DETECT_OCR_TIMEOUT_MS,
+        { success: false, text: '', confidence: 0 }
+      );
       if (ocrResult.success && ocrResult.text.length > 0) {
         setOcrText(ocrResult.text);
         setOcrConfidence(ocrResult.confidence);
@@ -345,7 +450,7 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
     } finally {
       setIsProcessing(false);
     }
-  }, [isProcessing, captureFrameCanvas, onTextExtracted, onSolutionGenerated]);
+  }, [isProcessing, captureFrameCanvas, onTextExtracted, onSolutionGenerated, withTimeout, DETECT_OCR_TIMEOUT_MS]);
 
 
   // Enhanced detection loop using multiple approaches
@@ -619,6 +724,9 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
         setOcrConfidence(0);
         setProcessingStats(null);
 
+
+        setOcrText(prev => prev || 'Analyzing...');
+        setDetectionMethod('doc-ocr-processing');
         // Capture and crop the document region
         const frame = captureFrameCanvas();
         if (!frame) return;
@@ -630,7 +738,7 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
         cctx.drawImage(frame, docBBox.x, docBBox.y, docBBox.w, docBBox.h, 0, 0, crop.width, crop.height);
 
         // Resize if too large (for performance)
-        const maxDim = 1600;
+        const maxDim = 1200;
         let processedCanvas = crop;
         if (crop.width > maxDim || crop.height > maxDim) {
           const scale = Math.min(maxDim / crop.width, maxDim / crop.height);
@@ -642,15 +750,18 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
           processedCanvas = resized;
         }
 
-        // Use enhanced OCR with multiple preprocessing approaches
-        const ocrResult = await enhancedOCR(processedCanvas, {
-          languages: 'eng',
-          fast: true,
-          useMultiplePreprocessing: false,
-          confidenceThreshold: 30, // Lower threshold for real-time processing
-          enableSpellCheck: false,
-          maxRetries: 0 // No retries in fast mode
-        });
+        // Fast OCR with timeout
+        const ocrResult = await withTimeout(
+          enhancedOCR(processedCanvas, {
+            languages: 'eng',
+            fast: true,
+            useMultiplePreprocessing: false,
+            confidenceThreshold: 30,
+            enableSpellCheck: false
+          }),
+          DETECT_OCR_TIMEOUT_MS,
+          { success: false, text: '', confidence: 0 }
+        );
 
         if (ocrResult.success && ocrResult.text.length > 0) {
           // Validate the OCR result
@@ -712,7 +823,7 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
         extractionTimerRef.current = null;
       }
     };
-  }, [docBBox, captureFrameCanvas, onTextExtracted, onSolutionGenerated]);
+  }, [docBBox, captureFrameCanvas, onTextExtracted, onSolutionGenerated, withTimeout, DETECT_OCR_TIMEOUT_MS]);
 
   // Fallback: if no document bbox, periodically run a quick text-only scan
   useEffect(() => {
@@ -817,9 +928,30 @@ const MobileCamera = ({ onTextExtracted, onSolutionGenerated }) => {
               <span className="flex items-center gap-2">🔄 {cameraMode === 'user' ? 'Rear' : 'Front'}</span>
             </button>
 
+                {/* Upload from Gallery (Mobile/Web) */}
+                <button
+                  onClick={handleOpenPicker}
+                  className="camera-overlay camera-button-hover bg-blue-500/80 text-white px-4 py-2 rounded-full border border-white/30 hover:bg-blue-500 transition-all duration-200 shadow-lg"
+                  disabled={isLoading}
+                >
+                  <span className="flex items-center gap-2">📁 Upload</span>
+                </button>
+
+
             {/* Shutter Button */}
 
           </div>
+
+              {/* Hidden file input for uploads */}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                capture="environment"
+                className="hidden"
+                onChange={handleFileChange}
+              />
+
 
           {/* Loading Overlay */}
           {isLoading && (

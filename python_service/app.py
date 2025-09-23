@@ -266,7 +266,7 @@ async def detect_ocr(
     image: UploadFile = File(...),
     conf: float = Query(0.30, ge=0.05, le=0.95),
     preferred_only: bool = Query(True, description="Return only document-like classes"),
-    max_results: int = Query(3, ge=1, le=10),
+    max_results: int = Query(1, ge=1, le=10),
 ):
     async with _infer_semaphore:
         try:
@@ -331,6 +331,22 @@ async def detect_ocr(
                 if rx2 - rx1 <= 2 or ry2 - ry1 <= 2:
                     continue
                 roi = np_rgb[ry1:ry2, rx1:rx2]
+                # Cap ROI size for speed on low-end devices
+                try:
+                    max_dim = 1200
+                    rh, rw = roi.shape[0], roi.shape[1]
+                    scale = min(1.0, max_dim / max(rw, rh))
+                    if scale < 1.0:
+                        if cv2 is not None:
+                            roi = cv2.resize(roi, (int(rw * scale), int(rh * scale)), interpolation=cv2.INTER_AREA)
+                        else:
+                            _pil_roi = Image.fromarray(roi)
+                            new_w = max(1, int(rw * scale)); new_h = max(1, int(rh * scale))
+                            _pil_roi = _pil_roi.resize((new_w, new_h), Image.BILINEAR)
+                            roi = np.array(_pil_roi)
+                except Exception:
+                    pass
+
                 roi_p = _preprocess_for_ocr(roi)
                 text, ocr_score = _run_ocr(roi_p)
 
